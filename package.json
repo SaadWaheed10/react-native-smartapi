@@ -48,12 +48,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/react-native-smartapi.git"
+    "url": "git+https://github.com/saadwaheed10/react-native-smartapi.git"
   },
+  "homepage": "https://github.com/saadwaheed10/react-native-smartapi#readme",
   "bugs": {
-    "url": "https://github.com/your-org/react-native-smartapi/issues"
+    "url": "https://github.com/saadwaheed10/react-native-smartapi/issues"
   },
-  "homepage": "https://github.com/your-org/react-native-smartapi#readme",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
