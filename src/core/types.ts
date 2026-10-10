@@ -60,7 +60,27 @@ export interface OfflineConfig {
   queueMutations?: boolean;
   /** Serve cached GET responses when offline, if available. */
   fallbackToCache?: boolean;
+  /**
+   * Persist the offline queue to AsyncStorage so it survives app restarts.
+   * Default: true when `@react-native-async-storage/async-storage` is installed.
+   */
+  persist?: boolean;
+  /** AsyncStorage key for the persisted queue. Default: `@smartapi:offline-queue`. */
+  storageKey?: string;
+  /**
+   * When true (default), queued mutations throw `REQUEST_QUEUED_OFFLINE`.
+   * When false, they resolve with `{ queued: true, ok: false, status: 0 }`.
+   */
+  throwOnQueue?: boolean;
 }
+
+export interface DevtoolsConfig {
+  /** Capture requests in an in-memory inspector (`api.devtools`). Default: false. */
+  enabled?: boolean;
+}
+
+/** Transport used for the underlying HTTP call. */
+export type TransportType = 'fetch' | 'xhr' | 'auto';
 
 export interface LoggerConfig {
   enabled?: boolean;
@@ -142,10 +162,15 @@ export interface SmartApiRequestConfig {
   formData?: Record<string, any>;
   /** Custom mapping of backend error codes -> human readable messages. */
   errorMap?: Record<string, string>;
-  /** Called with upload progress (0-100). Only applies to uploads via XHR path. */
+  /** Called with upload progress (0-100). Requires XHR transport (auto-selected when set). */
   onUploadProgress?: (percent: number) => void;
-  /** Called with download progress (0-100). */
+  /** Called with download progress (0-100). Requires XHR transport (auto-selected when set). */
   onDownloadProgress?: (percent: number) => void;
+  /**
+   * HTTP transport. `auto` (default) uses XHR when progress callbacks or FormData
+   * are present, otherwise `fetch`.
+   */
+  transport?: TransportType;
 }
 
 export interface SmartApiResponse<T = any> {
@@ -154,6 +179,8 @@ export interface SmartApiResponse<T = any> {
   headers: Record<string, string>;
   ok: boolean;
   fromCache?: boolean;
+  /** True when the mutation was queued because the device is offline. */
+  queued?: boolean;
   config: SmartApiRequestConfig;
 }
 
@@ -188,6 +215,18 @@ export interface SmartApiConfig {
   deviceInfo?: DeviceInfoProvider;
   /** Attach app version / platform / device id headers automatically. Default: true. */
   attachDeviceHeaders?: boolean;
+  /**
+   * Default HTTP transport for all requests. Per-request `transport` overrides this.
+   * Default: `'auto'`.
+   */
+  transport?: TransportType;
+  /** In-memory request inspector for development. */
+  devtools?: DevtoolsConfig;
+  /**
+   * Default stale time (ms) for React query hooks — data younger than this
+   * is considered fresh and won't refetch on remount/focus. Default: 0.
+   */
+  staleTime?: number;
   requestInterceptors?: RequestInterceptor[];
   responseInterceptors?: ResponseInterceptor[];
   errorInterceptors?: ErrorInterceptor[];

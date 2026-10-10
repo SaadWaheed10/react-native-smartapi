@@ -5,43 +5,39 @@ Thanks for considering a contribution! This document covers the project layout a
 ## Getting started
 
 ```bash
-git clone https://github.com/your-org/react-native-smartapi.git
+git clone https://github.com/saadwaheed10/react-native-smartapi.git
 cd react-native-smartapi
-yarn install
-yarn test
-yarn typecheck
+npm install
+npm test
+npm run typecheck
 ```
 
 ## Project layout
 
 See the "Project Structure" section in `README.md`. Each subsystem under `src/` is independent and unit-testable in isolation:
 
-- `core/SmartApiClient.ts` orchestrates every other subsystem through a single request pipeline (`request()` → interceptors → cache check → retry-wrapped execution → error handling → cache write).
-- `errors/ErrorEngine.ts` is the single source of truth for turning any failure into the unified `SmartApiError` shape. New error categories should be added here, not scattered across call sites.
+- `core/SmartApiClient.ts` orchestrates the request pipeline (`request()` → interceptors → offline → cache → retry-wrapped execution → error handling → cache write / invalidation).
+- `core/QueryManager.ts` handles in-flight dedupe and invalidation pub/sub for hooks.
+- `core/transports/xhrTransport.ts` provides real upload/download progress via `XMLHttpRequest`.
+- `errors/ErrorEngine.ts` is the single source of truth for turning any failure into `SmartApiError`.
 - `cache/`, `retry/`, `auth/`, `offline/` are self-contained managers instantiated once per `SmartApiClient`.
-- `hooks/` are thin React wrappers around a `SmartApiClient` instance (default: the shared singleton from `core/config.ts`, or an injected `client` for multi-backend apps).
+- `hooks/` are thin React wrappers around a `SmartApiClient` instance.
+- `testing/createTestClient.ts` is exported via the `react-native-smartapi/testing` subpath for Jest consumers.
 
-## Extending the transport layer (advanced)
+## Transport layer
 
-The default transport is the platform `fetch` global, chosen because it works identically across iOS, Android, and Hermes without extra native linking. This keeps peer-dependency conflicts to zero, per the package's compatibility goals.
-
-The trade-off: `fetch` doesn't expose byte-level upload/download progress events the way `XMLHttpRequest` does. If your app needs true progress bars:
-
-1. Implement an alternate transport in `src/core/transports/xhrTransport.ts` that mirrors `SmartApiClient`'s private `executeOnce` contract (accepts a resolved `SmartApiRequestConfig`, returns a raw response with `status`, `headers`, and a body).
-2. Wire progress events (`xhr.upload.onprogress` / `xhr.onprogress`) into the existing `onUploadProgress` / `onDownloadProgress` config callbacks — the public hook API (`useUpload`, `useDownload`) already plumbs these through and won't need to change.
-3. Make the transport selectable via `SmartApiConfig.transport: 'fetch' | 'xhr'` so it stays opt-in and the default zero-dependency behavior is preserved.
-
-PRs implementing this are very welcome.
+Default transport is `fetch`. When `onUploadProgress` / `onDownloadProgress` are set (or `transport: 'xhr'` / uploads), the client switches to `XMLHttpRequest` so progress events fire. Prefer extending `src/core/transports/` rather than forking `executeOnce`.
 
 ## Tests
 
 - Unit tests live in `__tests__/` and use Jest with the `react-native` preset.
-- `client.test.ts` mocks `global.fetch` — please keep new client-level tests consistent with that pattern rather than hitting real network endpoints.
-- Run `yarn test:coverage` before submitting a PR that touches `core/`, `errors/`, or `cache/`.
-- **Testing hooks:** the package doesn't ship a hook-testing dependency by default (`@testing-library/react-hooks` is deprecated and doesn't support React 18). If you add tests for `src/hooks/`, install `@testing-library/react-native` (`yarn add -D @testing-library/react-native`) instead — its `renderHook` works with React 18/RN 0.74+.
+- Mock `global.fetch` (or use `createTestClient`) — do not hit real network endpoints.
+- Run `npm run test:coverage` before submitting a PR that touches `core/`, `errors/`, `cache/`, or `offline/`.
+- Update `CHANGELOG.md` under `[Unreleased]` or the next version section when changing public API.
 
 ## Commit / PR conventions
 
 - Keep PRs focused on one subsystem where possible.
 - Update `README.md` when adding/changing public API surface.
 - Add or update tests alongside any behavioral change.
+- CI (GitHub Actions) runs typecheck, lint, tests, and build on every PR.

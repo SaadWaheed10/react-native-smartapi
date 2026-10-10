@@ -1,39 +1,49 @@
 # react-native-smartapi
 
-**The one-stop API layer for React Native (Bare Workflow).** Zero-config networking, interceptors, error handling, caching, retries, auth, offline support, and React hooks — no Axios required. Written 100% in TypeScript.
+**The one-stop API layer for React Native and Expo.** Zero-config networking, interceptors, error handling, caching, retries, auth, offline support, and React hooks — no Axios required. Written 100% in TypeScript.
 
 ```ts
 const users = await api.get('/users');
 ```
 ```tsx
-const { data, loading, error } = useGet('/users');
+const { data, loading, error, refetch } = useGet('/users', {
+  staleTime: 30_000,
+  refetchOnFocus: true,
+});
 ```
 
 ---
 
 ## Features
 
-- 🚀 **Built-in HTTP client** — GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, uploads, downloads, parallel & batch requests. Built on native `fetch`, so you never install Axios.
+- 🚀 **Built-in HTTP client** — GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, uploads, downloads, parallel & batch. Built on native `fetch` (XHR when you need progress).
 - 🧠 **Smart interceptor system** — request & response interceptors, with built-ins for auth injection, device headers, and logging.
-- 🛡 **Universal error engine** — every failure (HTTP, network, timeout, parse, cancellation) is normalized into one predictable shape: `{ code, status, message, type, details }`.
-- 🔁 **Retry & recovery** — automatic retries with exponential backoff + jitter, configurable per request.
+- 🛡 **Universal error engine** — every failure normalized to `{ code, status, message, type, details }`.
+- 🔁 **Retry & recovery** — exponential backoff + jitter, configurable per request.
 - 🔐 **Auth management** — token injection, single-flight auto-refresh on 401, logout hooks.
-- 📦 **Built-in caching** — memory or persistent (via optional AsyncStorage), TTL, cache-first / network-first / stale-while-revalidate.
-- 📡 **Offline-first** — queues mutations while offline (via optional NetInfo) and flushes them on reconnect; can serve cached GETs when offline.
-- 🎯 **Query & selection engine** — pull exactly the nested field you need with `select`.
-- 🪄 **Transform engine** — reshape, rename, filter, sort responses with a plain function.
-- ⚛️ **React hooks** — `useApi`, `useGet`, `usePost`, `useMutation`, `useInfiniteApi`, `useUpload`, `useDownload`.
-- 🧵 **Cancellation** — every request supports `AbortController` under the hood.
+- 📦 **Built-in caching** — memory or persistent (AsyncStorage), TTL, cache-first / network-first / stale-while-revalidate.
+- 📡 **Offline-first** — queues mutations while offline, **persists across app restarts**, flushes on reconnect; `useOfflineQueue()` for UI.
+- 🎯 **Query DX** — request dedupe, `staleTime`, `refetchOnFocus`, `api.invalidate()`, `isFetching`.
+- 🪄 **Transform / select** — pull nested fields and reshape responses.
+- ⚛️ **React hooks** — `useApi`, `useGet`, `usePost`, `useMutation`, `useInfiniteApi`, `useUpload`, `useDownload`, `useOfflineQueue`, `useRequestLog`.
+- 📈 **Real upload/download progress** — automatic XHR transport when progress callbacks are set.
+- 🧪 **Testing helpers** — `createTestClient` via `react-native-smartapi/testing`.
+- 🧵 **Cancellation** — `AbortController` under the hood.
 - 🧩 **Fully typed** — strict TypeScript, IntelliSense everywhere.
+- 📱 **Expo + bare RN** — pure JS/TS, no native module of its own.
 
 ---
 
 ## Installation
 
+Works with **Expo** and **React Native CLI**.
+
 ```bash
 npm install react-native-smartapi
 # or
 yarn add react-native-smartapi
+# or
+npx expo install react-native-smartapi
 ```
 
 ### Optional peer dependencies
@@ -43,42 +53,41 @@ These unlock extra features but are **not required** — the package degrades gr
 ```bash
 # Persistent cache + offline queue survival across app restarts
 npm install @react-native-async-storage/async-storage
+# Expo:
+npx expo install @react-native-async-storage/async-storage
 
 # Offline detection / network state monitoring
 npm install @react-native-community/netinfo
+# Expo:
+npx expo install @react-native-community/netinfo
 ```
-
-No native linking is required beyond the standard autolinking for the optional modules above — `react-native-smartapi` itself is pure JS/TS.
 
 ---
 
 ## Quick Start
 
-**1. Configure once, near your app's entry point:**
+**1. Configure once** (e.g. `apiConfig.ts` or your root layout):
 
 ```ts
-// apiConfig.ts
 import { configureApi } from 'react-native-smartapi';
-import * as SecureStore from './secureStore'; // your token storage of choice
 
 configureApi({
   baseURL: 'https://api.example.com',
   timeout: 15000,
+  staleTime: 15_000,
   auth: {
     getToken: () => SecureStore.getAccessToken(),
-    onRefreshToken: async () => {
-      const newToken = await SecureStore.refreshAccessToken();
-      return newToken;
-    },
+    onRefreshToken: async () => SecureStore.refreshAccessToken(),
     onUnauthorized: async () => {
       await SecureStore.clearTokens();
-      // navigate to login screen, etc.
+      // navigate to login
     },
   },
   cache: { enabled: true, ttl: 5 * 60 * 1000 },
   retry: { enabled: true, attempts: 3 },
-  offline: { enabled: true, queueMutations: true, fallbackToCache: true },
+  offline: { enabled: true, queueMutations: true, fallbackToCache: true, persist: true },
   logger: { enabled: __DEV__, level: 'debug' },
+  devtools: { enabled: __DEV__ },
   errorMap: {
     USER_NOT_FOUND: 'User does not exist',
     INVALID_OTP: 'The code you entered is incorrect',
@@ -95,17 +104,25 @@ const users = await api.get('/users');
 const created = await api.post('/users', { name: 'Ada Lovelace' });
 ```
 
-**3. Or use the React hooks:**
+**3. Or use React hooks:**
 
 ```tsx
-import { useGet } from 'react-native-smartapi';
+import { useGet, useMutation } from 'react-native-smartapi';
 
 function UsersScreen() {
-  const { data, loading, error, refetch } = useGet('/users');
+  const { data, loading, error, refetch, isFetching } = useGet('/users', {
+    staleTime: 30_000,
+    refetchOnFocus: true,
+  });
+
+  const { mutate, queued } = useMutation('/users', {
+    method: 'POST',
+    invalidateKeys: ['/users'],
+  });
 
   if (loading) return <LoadingSpinner />;
   if (error) return <ErrorView message={error.message} onRetry={refetch} />;
-  return <UserList users={data} />;
+  return <UserList users={data} refreshing={isFetching} onCreate={() => mutate({ name: 'Ada' })} />;
 }
 ```
 
@@ -123,24 +140,24 @@ api.patch(url, data?, config?)
 api.delete(url, config?)
 api.head(url, config?)
 api.options(url, config?)
-api.parallel([{ url: '/a' }, { url: '/b' }])           // Promise.all semantics
-api.batch([{ url: '/a' }, { url: '/b' }])                // never throws; per-item results
+api.parallel([{ url: '/a' }, { url: '/b' }])
+api.batch([{ url: '/a' }, { url: '/b' }])
 api.upload(url, { file }, extraFields?, config?)
 api.download(url, config?)
 ```
 
-### `select` — pull exactly what you need
+### Invalidation
 
 ```ts
-await api.get('/users');                                  // full response
-await api.get('/users', { select: 'profile' });           // top-level object
-await api.get('/users', { select: 'data.profile.name' }); // nested property
-await api.get('/users', { select: 'data.users' });        // array extraction
+api.invalidate('/users');        // cache + refetch matching hooks
+api.invalidate('GET:/users');
+api.invalidate();                // clear everything
 ```
 
-### `transform` — reshape data
+### `select` / `transform`
 
 ```ts
+await api.get('/users', { select: 'data.profile.name' });
 await api.get('/users', {
   transform: (users) => users.map((u) => ({ id: u.user_id, name: u.full_name })),
 });
@@ -148,63 +165,85 @@ await api.get('/users', {
 
 ### Unified errors
 
-Every error thrown by SmartAPI has this shape:
-
 ```ts
 {
-  code: string;      // e.g. "HTTP_404" or a custom backend code like "USER_NOT_FOUND"
+  code: string;
   status: number;
-  message: string;   // human-readable, ready to show in the UI
+  message: string;   // UI-ready
   type: 'HTTP_ERROR' | 'NETWORK_ERROR' | 'TIMEOUT_ERROR' | 'CANCELLED'
       | 'PARSE_ERROR' | 'AUTH_ERROR' | 'VALIDATION_ERROR' | 'UNKNOWN_ERROR';
   details?: any;
 }
 ```
 
-```ts
-try {
-  await api.get('/users/999');
-} catch (err) {
-  const error = err as SmartApiError; // err.message, err.status, err.code, err.type
-}
-```
-
-### Interceptors
-
-```ts
-import { api } from 'react-native-smartapi';
-
-const removeInterceptor = api.useRequestInterceptor((config) => {
-  return { ...config, headers: { ...config.headers, 'X-Trace-Id': generateTraceId() } };
-});
-
-api.useResponseInterceptor((response) => {
-  // e.g. unwrap a custom envelope
-  return response;
-});
-
-api.useErrorInterceptor((error) => {
-  Analytics.logApiError(error);
-  return error; // return a SmartApiResponse instead to "recover" from the error
-});
-```
-
 ### Caching
 
 ```ts
-await api.get('/users', { cache: true });                          // use global cache defaults
+await api.get('/users', { cache: true });
 await api.get('/users', { cache: { ttl: 60000, storage: 'persistent' } });
-await api.get('/users', { cache: false });                          // force network
-
-api.cache.invalidatePrefix('GET:/users');                           // manual invalidation
 await api.cache.clearAll();
 ```
 
-### Retry
+### Upload / download progress
+
+Progress uses **XHR** automatically when you pass callbacks (or `transport: 'xhr'`):
 
 ```ts
-await api.get('/flaky-endpoint', {
-  retry: { enabled: true, attempts: 5, baseDelayMs: 500 },
+await api.upload('/avatar', { file: { uri, name: 'a.jpg', type: 'image/jpeg' } }, undefined, {
+  onUploadProgress: (percent) => console.log(percent),
+});
+
+const { upload, progress } = useUpload('/avatar');
+await upload({ file: { uri, name: 'a.jpg', type: 'image/jpeg' } });
+```
+
+```ts
+import { createFormData } from 'react-native-smartapi';
+
+await api.post('/upload', undefined, {
+  formData: createFormData({
+    photos: [
+      { uri: uri1, name: '1.jpg', type: 'image/jpeg' },
+      { uri: uri2, name: '2.jpg', type: 'image/jpeg' },
+    ],
+    caption: 'hello',
+  }),
+  transport: 'xhr',
+  onUploadProgress: (p) => setProgress(p),
+});
+```
+
+### Offline queue
+
+```ts
+import { useOfflineQueue } from 'react-native-smartapi';
+
+const { size, queue, isOnline, flush, clear } = useOfflineQueue();
+// size > 0 → show “pending sync” UI
+```
+
+Queued mutations throw `REQUEST_QUEUED_OFFLINE` by default (hooks set `queued: true`). Set `offline.throwOnQueue: false` to resolve with `{ queued: true }` instead.
+
+### Infinite scroll
+
+```tsx
+// Page numbers
+const { items, loadMore, hasMore } = useInfiniteApi('/posts', {
+  pageParamName: 'page',
+  pageSize: 20,
+});
+
+// Cursor
+const feed = useInfiniteApi('/feed', {
+  paginationMode: 'cursor',
+  getNextPageParam: (page) => page.nextCursor ?? null,
+  getItems: (page) => page.items,
+});
+
+// Next URL
+const path = useInfiniteApi('/items', {
+  paginationMode: 'path',
+  getNextPageParam: (page) => page.next ?? null,
 });
 ```
 
@@ -214,7 +253,33 @@ await api.get('/flaky-endpoint', {
 import { createApi } from 'react-native-smartapi';
 
 const paymentsApi = createApi({ baseURL: 'https://payments.example.com' });
-const contentApi = createApi({ baseURL: 'https://cdn.example.com' });
+const { data } = useGet('/invoices', { client: paymentsApi });
+```
+
+### Devtools
+
+```ts
+configureApi({ devtools: { enabled: __DEV__ } });
+
+import { useRequestLog } from 'react-native-smartapi';
+const entries = useRequestLog(); // in-memory request inspector
+```
+
+### Testing
+
+```ts
+import { createTestClient } from 'react-native-smartapi/testing';
+
+const api = createTestClient({
+  baseURL: 'https://api.test',
+  handlers: [
+    { method: 'GET', url: '/users', body: [{ id: 1 }] },
+    { method: 'POST', url: '/users', status: 201, body: { id: 2 } },
+  ],
+});
+
+const res = await api.get('/users');
+api.restoreFetch();
 ```
 
 ---
@@ -223,23 +288,18 @@ const contentApi = createApi({ baseURL: 'https://cdn.example.com' });
 
 | Hook | Purpose |
 |---|---|
-| `useApi(url, options)` | Generic fetch hook — loading/error/success/refetch/polling |
-| `useGet(url, options)` | GET shorthand for `useApi` |
-| `usePost(url, data, options)` | POST shorthand, fetch-on-mount disabled by default |
-| `useMutation(url, options)` | Imperative create/update/delete via `mutate()` |
-| `useInfiniteApi(url, options)` | Pagination / infinite scroll |
-| `useUpload(url, options)` | File upload with progress |
-| `useDownload(url, options)` | File download with progress |
+| `useApi` / `useGet` / `usePost` | Fetch with loading/error/`staleTime`/`refetchOnFocus`/dedupe |
+| `useMutation` | Imperative mutate + `invalidateKeys` + `queued` |
+| `useInfiniteApi` | Page / cursor / next-URL pagination |
+| `useUpload` / `useDownload` | File transfer with real progress |
+| `useOfflineQueue` | Observe & control the offline mutation queue |
+| `useRequestLog` | Subscribe to the dev request inspector |
 
-```tsx
-const { mutate, loading, error } = useMutation('/users', { method: 'POST' });
-await mutate({ name: 'Ada' });
+---
 
-const { items, loadMore, hasMore } = useInfiniteApi('/posts');
-<FlatList data={items} onEndReached={loadMore} />
-```
+## Example app
 
-> **Note on upload/download progress:** progress callbacks (`onUploadProgress` / `onDownloadProgress`) are part of the public API and wired through the hooks; because this package is built on `fetch` (not `XMLHttpRequest`) for platform-agnostic compatibility, real-time byte-level progress requires either enabling RN's `XMLHttpRequest`-based polyfill in your app or swapping in your own progress-capable transport via `fetchOptions`. See `CONTRIBUTING.md` for extending the transport layer.
+See [`examples/`](./examples) for a tabbed Expo/RN demo covering cache invalidation, infinite scroll, offline queue, and the request log.
 
 ---
 
@@ -248,38 +308,35 @@ const { items, loadMore, hasMore } = useInfiniteApi('/posts');
 ```
 react-native-smartapi/
 ├── src/
-│   ├── core/            # SmartApiClient, types, config/factory
-│   ├── interceptors/     # Built-in request/response interceptors
-│   ├── errors/            # ErrorEngine + default error message maps
-│   ├── cache/             # MemoryCache, PersistentCache, CacheManager
-│   ├── retry/             # RetryManager (exponential backoff)
-│   ├── auth/               # TokenManager (injection + refresh)
-│   ├── offline/            # NetworkMonitor, OfflineQueue
-│   ├── transform/          # DataSelector, DataTransformer
-│   ├── hooks/               # useApi, useGet, usePost, useMutation, ...
-│   ├── utils/                # logger, deviceInfo, helpers
-│   └── index.ts               # Public exports
-├── __tests__/                  # Jest unit + integration tests
-├── examples/                    # Example App.tsx
-├── package.json
-├── tsconfig.json
+│   ├── core/            # SmartApiClient, QueryManager, transports, types
+│   ├── interceptors/
+│   ├── errors/
+│   ├── cache/
+│   ├── retry/
+│   ├── auth/
+│   ├── offline/
+│   ├── transform/
+│   ├── hooks/
+│   ├── testing/         # createTestClient (subpath export)
+│   ├── devtools/
+│   ├── utils/
+│   └── index.ts
+├── __tests__/
+├── examples/
+├── CHANGELOG.md
 └── README.md
 ```
 
 ---
 
-## Testing
+## Scripts
 
 ```bash
 npm test
 npm run test:coverage
-```
-
-## Building
-
-```bash
-npm run build      # compiles CJS + ESM + type declarations via react-native-builder-bob
 npm run typecheck
+npm run lint
+npm run build
 ```
 
 ## License

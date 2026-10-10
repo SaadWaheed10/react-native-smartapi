@@ -5,6 +5,7 @@ import type {
   SmartApiConfig,
   SmartApiRequestConfig,
   SmartApiResponse,
+  TransportType,
 } from './types';
 import { SmartApiError } from './types';
 import { ErrorEngine } from '../errors/ErrorEngine';
@@ -24,6 +25,10 @@ import { createResponseLogger } from '../interceptors/responseInterceptors';
 import { selectData } from '../transform/DataSelector';
 import { applyTransform } from '../transform/DataTransformer';
 import { buildQueryString, deepMerge, generateCacheKey, isPlainObject, joinUrl } from '../utils/helpers';
+import { createFormData } from '../utils/formData';
+import { QueryManager } from './QueryManager';
+import { RequestLog } from '../devtools/RequestLog';
+import { shouldUseXhr, xhrRequest } from './transports/xhrTransport';
 
 const DEFAULT_TIMEOUT = 30000;
 
@@ -35,6 +40,8 @@ export class SmartApiClient {
   private tokenManager: TokenManager;
   private networkMonitor: NetworkMonitor;
   private offlineQueue: OfflineQueue;
+  private queryManager: QueryManager;
+  private requestLog: RequestLog;
   private logger: Logger;
 
   private requestInterceptors: RequestInterceptor[] = [];
@@ -49,8 +56,10 @@ export class SmartApiClient {
     this.retryManager = new RetryManager(config.retry);
     this.tokenManager = new TokenManager(config.auth);
     this.networkMonitor = new NetworkMonitor();
-    this.offlineQueue = new OfflineQueue(this.networkMonitor);
+    this.offlineQueue = new OfflineQueue(this.networkMonitor, config.offline);
     this.offlineQueue.setFlusher((cfg) => this.request(cfg));
+    this.queryManager = new QueryManager();
+    this.requestLog = new RequestLog(!!config.devtools?.enabled);
 
     const deviceInfo = config.deviceInfo ?? createDefaultDeviceInfoProvider();
 
@@ -79,6 +88,8 @@ export class SmartApiClient {
     if (partial.auth) this.tokenManager.updateConfig(partial.auth);
     if (partial.errorMap) this.errorEngine.setGlobalErrorMap(partial.errorMap);
     if (partial.logger) this.logger = new Logger({ ...this.config.logger, ...partial.logger });
+    if (partial.offline) this.offlineQueue.updateConfig(partial.offline);
+    if (partial.devtools) this.requestLog.setEnabled(!!partial.devtools.enabled);
   }
 
   useRequestInterceptor(interceptor: RequestInterceptor): () => void {
@@ -102,6 +113,11 @@ export class SmartApiClient {
     };
   }
 
+  /** Read-only snapshot of the active client configuration. */
+  getConfig(): Readonly<SmartApiConfig> {
+    return this.config;
+  }
+
   get cache(): CacheManager {
     return this.cacheManager;
   }
@@ -112,6 +128,36 @@ export class SmartApiClient {
 
   get network(): NetworkMonitor {
     return this.networkMonitor;
+  }
+
+  get queries(): QueryManager {
+    return this.queryManager;
+  }
+
+  get devtools(): RequestLog {
+    return this.requestLog;
+  }
+
+  /**
+   * Invalidate cached responses and notify React hooks to refetch.
+   * Pass a URL, cache key, or prefix — omit to invalidate everything.
+   *
+   *   api.invalidate('/users')
+   *   api.invalidate('GET:/users')
+   *   api.invalidate()
+   */
+  invalidate(keyOrPrefix?: string): void {
+    if (!keyOrPrefix) {
+      void this.cacheManager.clearAll();
+      this.queryManager.invalidate();
+      return;
+    }
+    this.cacheManager.invalidatePrefix(keyOrPrefix);
+    // Also try common GET: prefix forms.
+    if (!keyOrPrefix.startsWith('GET:') && !keyOrPrefix.includes(':')) {
+      this.cacheManager.invalidatePrefix(`GET:${keyOrPrefix}`);
+    }
+    this.queryManager.invalidate(keyOrPrefix);
   }
 
   // ---------------------------------------------------------------------
@@ -181,6 +227,8 @@ export class SmartApiClient {
       url,
       method: 'POST',
       formData: { ...extraFields, ...files },
+      // Prefer XHR so upload progress events fire.
+      transport: config.transport ?? 'xhr',
     });
   }
 
@@ -189,7 +237,13 @@ export class SmartApiClient {
     url: string,
     config: Omit<SmartApiRequestConfig, 'url' | 'method'> = {}
   ): Promise<SmartApiResponse<Blob>> {
-    return this.request<Blob>({ ...config, url, method: 'GET', fetchOptions: { ...config.fetchOptions } });
+    return this.request<Blob>({
+      ...config,
+      url,
+      method: 'GET',
+      transport: config.transport ?? (config.onDownloadProgress ? 'xhr' : config.transport),
+      fetchOptions: { ...config.fetchOptions },
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -201,6 +255,7 @@ export class SmartApiClient {
       method: 'GET',
       timeout: this.config.timeout ?? DEFAULT_TIMEOUT,
       ...rawConfig,
+      transport: rawConfig.transport ?? this.config.transport ?? 'auto',
       baseURL: rawConfig.baseURL ?? this.config.baseURL,
       headers: { ...this.config.headers, ...rawConfig.headers },
     };
@@ -215,56 +270,89 @@ export class SmartApiClient {
     const cacheConfig = this.cacheManager.resolveConfig(config.cache);
     const cacheKey = cacheConfig.key ?? generateCacheKey(config.method ?? 'GET', config.url, config.params);
     const isGet = (config.method ?? 'GET').toUpperCase() === 'GET';
+    const logId = this.requestLog.start(config);
 
-    // Offline handling: queue mutations, or fall back to cache for reads.
-    if (this.config.offline?.enabled) {
-      const isOnline = await this.networkMonitor.isOnline();
-      if (!isOnline) {
-        if (!isGet && this.config.offline.queueMutations) {
-          this.offlineQueue.enqueue(config);
-          throw new SmartApiError({
-            code: 'REQUEST_QUEUED_OFFLINE',
-            status: 0,
-            message: 'You are offline. This request has been queued and will run automatically when you reconnect.',
-            type: 'NETWORK_ERROR',
-          });
-        }
-        if (isGet && this.config.offline.fallbackToCache) {
-          const cached = await this.cacheManager.get<T>(cacheKey, cacheConfig.storage);
-          if (cached !== undefined) {
-            return this.finalize<T>(cached, config, 200, {}, true);
+    try {
+      // Offline handling: queue mutations, or fall back to cache for reads.
+      if (this.config.offline?.enabled) {
+        await this.offlineQueue.ready();
+        const isOnline = await this.networkMonitor.isOnline();
+        if (!isOnline) {
+          if (!isGet && this.config.offline.queueMutations) {
+            const item = this.offlineQueue.enqueue(config);
+            if (this.config.offline.throwOnQueue === false) {
+              const queuedResponse: SmartApiResponse<T> = {
+                data: undefined as any,
+                status: 0,
+                headers: {},
+                ok: false,
+                queued: true,
+                config,
+              };
+              this.requestLog.success(logId, queuedResponse);
+              return queuedResponse;
+            }
+            const queuedError = new SmartApiError({
+              code: 'REQUEST_QUEUED_OFFLINE',
+              status: 0,
+              message:
+                'You are offline. This request has been queued and will run automatically when you reconnect.',
+              type: 'NETWORK_ERROR',
+              details: { queueId: item.id, queueSize: this.offlineQueue.size() },
+            });
+            this.requestLog.failure(logId, queuedError);
+            throw queuedError;
+          }
+          if (isGet && this.config.offline.fallbackToCache) {
+            const cached = await this.cacheManager.get<T>(cacheKey, cacheConfig.storage);
+            if (cached !== undefined) {
+              const response = this.finalize<T>(cached, config, 200, {}, true);
+              this.requestLog.success(logId, response);
+              return response;
+            }
           }
         }
       }
-    }
 
-    // Cache read (cache-first / stale-while-revalidate).
-    if (isGet && cacheConfig.enabled && cacheConfig.policy !== 'network-first') {
-      const cached = await this.cacheManager.get<T>(cacheKey, cacheConfig.storage);
-      if (cached !== undefined) {
-        if (cacheConfig.policy === 'stale-while-revalidate') {
-          // Return cached immediately, refresh in background.
-          void this.executeWithRetry<T>(config).then(async (res) => {
-            await this.cacheManager.set(cacheKey, res.data, cacheConfig.ttl, cacheConfig.storage);
-          }).catch(() => undefined);
+      // Cache read (cache-first / stale-while-revalidate).
+      if (isGet && cacheConfig.enabled && cacheConfig.policy !== 'network-first') {
+        const cached = await this.cacheManager.get<T>(cacheKey, cacheConfig.storage);
+        if (cached !== undefined) {
+          if (cacheConfig.policy === 'stale-while-revalidate') {
+            void this.executeWithRetry<T>(config)
+              .then(async (res) => {
+                await this.cacheManager.set(cacheKey, res.data, cacheConfig.ttl, cacheConfig.storage);
+              })
+              .catch(() => undefined);
+          }
+          const response = this.finalize<T>(cached, config, 200, {}, true);
+          this.requestLog.success(logId, response);
+          return response;
         }
-        return this.finalize<T>(cached, config, 200, {}, true);
       }
+
+      const response = await this.executeWithRetry<T>(config);
+
+      if (isGet && cacheConfig.enabled) {
+        await this.cacheManager.set(cacheKey, response.data, cacheConfig.ttl, cacheConfig.storage);
+      }
+
+      // Invalidate cached GETs for the same resource after a mutation.
+      if (!isGet) {
+        const urlRoot = config.url.split('?')[0];
+        this.cacheManager.invalidatePrefix(`GET:${urlRoot}`);
+        this.queryManager.invalidate(`GET:${urlRoot}`);
+        this.queryManager.invalidate(urlRoot);
+      }
+
+      this.requestLog.success(logId, response);
+      return response;
+    } catch (err) {
+      if (err instanceof SmartApiError) {
+        this.requestLog.failure(logId, err);
+      }
+      throw err;
     }
-
-    const response = await this.executeWithRetry<T>(config);
-
-    if (isGet && cacheConfig.enabled) {
-      await this.cacheManager.set(cacheKey, response.data, cacheConfig.ttl, cacheConfig.storage);
-    }
-
-    // Invalidate cached GETs for the same resource root after a mutation.
-    if (!isGet) {
-      this.cacheManager.invalidatePrefix(`${(config.method ?? 'GET').toUpperCase()}`);
-      this.cacheManager.invalidatePrefix(`GET:${config.url.split('?')[0]}`);
-    }
-
-    return response;
   }
 
   private async executeWithRetry<T>(config: SmartApiRequestConfig): Promise<SmartApiResponse<T>> {
@@ -309,7 +397,6 @@ export class SmartApiClient {
     for (const interceptor of this.errorInterceptors) {
       const result = await interceptor(smartError);
       if (!(result instanceof SmartApiError)) {
-        // An error interceptor recovered the request with a synthetic response.
         return result as SmartApiResponse<T>;
       }
       smartError = result;
@@ -331,30 +418,45 @@ export class SmartApiClient {
     }
 
     const { body, headers: bodyHeaders } = this.buildBody(config);
+    const headers = { ...bodyHeaders, ...config.headers };
+    const transport: TransportType = config.transport ?? this.config.transport ?? 'auto';
+    const useXhr = shouldUseXhr(transport, config);
 
-    const fetchInit: RequestInit = {
-      method: config.method ?? 'GET',
-      headers: { ...bodyHeaders, ...config.headers },
-      body,
-      signal: controller.signal,
-      ...config.fetchOptions,
-    };
-
-    let rawResponse: Response;
     try {
-      rawResponse = await fetch(fullUrl, fetchInit);
+      if (useXhr) {
+        return await this.executeWithXhr<T>(fullUrl, config, headers, body, controller.signal);
+      }
+      return await this.executeWithFetch<T>(fullUrl, config, headers, body, controller.signal);
     } catch (err) {
-      clearTimeout(timeoutId);
       if (controller.signal.aborted) {
         throw this.errorEngine.normalize({ aborted: true });
       }
-      throw this.errorEngine.normalize({ raw: err });
+      throw err instanceof SmartApiError ? err : this.errorEngine.normalize({ raw: err });
+    } finally {
+      clearTimeout(timeoutId);
     }
-    clearTimeout(timeoutId);
+  }
 
-    const headers: Record<string, string> = {};
-    rawResponse.headers.forEach((value, key) => {
-      headers[key] = value;
+  private async executeWithFetch<T>(
+    fullUrl: string,
+    config: SmartApiRequestConfig,
+    headers: Record<string, string>,
+    body: BodyInit | undefined,
+    signal: AbortSignal
+  ): Promise<SmartApiResponse<T>> {
+    const fetchInit: RequestInit = {
+      method: config.method ?? 'GET',
+      headers,
+      body,
+      signal,
+      ...config.fetchOptions,
+    };
+
+    const rawResponse = await fetch(fullUrl, fetchInit);
+
+    const responseHeaders: Record<string, string> = {};
+    rawResponse.headers.forEach((value: string, key: string) => {
+      responseHeaders[key] = value;
     });
 
     const parsedBody = await this.parseBody(rawResponse);
@@ -367,24 +469,69 @@ export class SmartApiClient {
       });
     }
 
-    let response = this.buildResponse<T>(parsedBody, config, rawResponse.status, headers);
+    return this.runResponseInterceptors(
+      this.buildResponse<T>(parsedBody, config, rawResponse.status, responseHeaders),
+      config
+    );
+  }
 
-    if (!config.skipInterceptors) {
-      for (const interceptor of this.responseInterceptors) {
-        response = (await interceptor(response)) as SmartApiResponse<T>;
-      }
+  private async executeWithXhr<T>(
+    fullUrl: string,
+    config: SmartApiRequestConfig,
+    headers: Record<string, string>,
+    body: BodyInit | undefined,
+    signal: AbortSignal
+  ): Promise<SmartApiResponse<T>> {
+    const wantsBlob = !!(config.onDownloadProgress || config.method === 'GET' && config.fetchOptions);
+    const result = await xhrRequest({
+      url: fullUrl,
+      method: config.method ?? 'GET',
+      headers,
+      body,
+      timeout: config.timeout,
+      signal,
+      responseType: wantsBlob ? 'blob' : 'text',
+      onUploadProgress: config.onUploadProgress,
+      onDownloadProgress: config.onDownloadProgress,
+    });
+
+    if (config.onUploadProgress) config.onUploadProgress(100);
+    if (config.onDownloadProgress) config.onDownloadProgress(100);
+
+    const parsedBody = this.parseXhrBody(result.bodyText, result.headers, result.raw);
+
+    if (result.status < 200 || result.status >= 300) {
+      throw this.errorEngine.normalize({
+        status: result.status,
+        body: parsedBody,
+        errorMap: config.errorMap ?? this.config.errorMap,
+      });
     }
 
-    return response;
+    return this.runResponseInterceptors(
+      this.buildResponse<T>(parsedBody, config, result.status, result.headers),
+      config
+    );
+  }
+
+  private async runResponseInterceptors<T>(
+    response: SmartApiResponse<T>,
+    config: SmartApiRequestConfig
+  ): Promise<SmartApiResponse<T>> {
+    if (config.skipInterceptors) return response;
+    let current = response;
+    for (const interceptor of this.responseInterceptors) {
+      current = (await interceptor(current)) as SmartApiResponse<T>;
+    }
+    return current;
   }
 
   private buildBody(config: SmartApiRequestConfig): { body?: BodyInit; headers: Record<string, string> } {
     if (config.formData) {
-      const form = new FormData();
-      Object.entries(config.formData).forEach(([key, value]) => {
-        // React Native file shape: { uri, name, type }
-        form.append(key, value as any);
-      });
+      const form =
+        typeof FormData !== 'undefined' && config.formData instanceof FormData
+          ? config.formData
+          : createFormData(config.formData);
       return { body: form, headers: {} };
     }
 
@@ -412,11 +559,42 @@ export class SmartApiClient {
       if (contentType.includes('text/')) {
         return response.text();
       }
-      // Binary / blob fallback (downloads, images, etc).
       if (typeof (response as any).blob === 'function') {
         return response.blob();
       }
       return response.text();
+    } catch (err) {
+      throw this.errorEngine.normalize({ raw: err });
+    }
+  }
+
+  private parseXhrBody(
+    bodyText: string,
+    headers: Record<string, string>,
+    raw: any
+  ): any {
+    const contentType = headers['content-type'] ?? '';
+    try {
+      if (raw && typeof raw !== 'string' && (contentType.includes('octet-stream') || contentType.includes('image/') || contentType.includes('pdf'))) {
+        return raw;
+      }
+      if (contentType.includes('application/json')) {
+        return bodyText ? JSON.parse(bodyText) : null;
+      }
+      if (contentType.includes('text/')) {
+        return bodyText;
+      }
+      if (raw && typeof Blob !== 'undefined' && raw instanceof Blob) {
+        return raw;
+      }
+      if (bodyText) {
+        try {
+          return JSON.parse(bodyText);
+        } catch {
+          return bodyText;
+        }
+      }
+      return raw ?? null;
     } catch (err) {
       throw this.errorEngine.normalize({ raw: err });
     }
@@ -454,5 +632,6 @@ export class SmartApiClient {
   /** Cleanup listeners (call on app teardown / test cleanup). */
   destroy(): void {
     this.networkMonitor.destroy();
+    this.queryManager.destroy();
   }
 }
