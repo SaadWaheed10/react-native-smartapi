@@ -13,6 +13,10 @@ export interface NormalizeErrorOptions {
   raw?: unknown;
   /** Was this request aborted intentionally? */
   aborted?: boolean;
+  /** Was this abort caused by the client-side timeout? */
+  timedOut?: boolean;
+  /** Override message for timeout errors. */
+  timeoutMessage?: string;
 }
 
 /**
@@ -33,6 +37,15 @@ export class ErrorEngine {
   }
 
   normalize(options: NormalizeErrorOptions): SmartApiError {
+    if (options.timedOut) {
+      return new SmartApiError({
+        code: 'TIMEOUT',
+        status: 0,
+        message: options.timeoutMessage ?? NETWORK_ERROR_MESSAGES.TIMEOUT,
+        type: 'TIMEOUT_ERROR',
+      });
+    }
+
     if (options.aborted) {
       return new SmartApiError({
         code: 'REQUEST_CANCELLED',
@@ -46,7 +59,7 @@ export class ErrorEngine {
       return this.fromHttpResponse(options.status, options.body, options.errorMap);
     }
 
-    return this.fromException(options.raw);
+    return this.fromException(options.raw, options.timeoutMessage);
   }
 
   private fromHttpResponse(
@@ -85,12 +98,21 @@ export class ErrorEngine {
     });
   }
 
-  private fromException(raw: unknown): SmartApiError {
+  private fromException(raw: unknown, timeoutMessage?: string): SmartApiError {
     const err = raw as any;
     const message: string = err?.message ?? String(raw ?? 'Unknown error');
 
     // AbortController abort surfaces as a DOMException/Error named "AbortError".
     if (err?.name === 'AbortError') {
+      if (err?.__smartApiTimedOut || /timeout/i.test(message)) {
+        return new SmartApiError({
+          code: 'TIMEOUT',
+          status: 0,
+          message: timeoutMessage ?? NETWORK_ERROR_MESSAGES.TIMEOUT,
+          type: 'TIMEOUT_ERROR',
+          details: err,
+        });
+      }
       return new SmartApiError({
         code: 'REQUEST_CANCELLED',
         status: 0,
@@ -99,11 +121,11 @@ export class ErrorEngine {
       });
     }
 
-    if (/timeout/i.test(message)) {
+    if (err?.name === 'TimeoutError' || /timeout/i.test(message)) {
       return new SmartApiError({
         code: 'TIMEOUT',
         status: 0,
-        message: NETWORK_ERROR_MESSAGES.TIMEOUT,
+        message: timeoutMessage ?? NETWORK_ERROR_MESSAGES.TIMEOUT,
         type: 'TIMEOUT_ERROR',
         details: err,
       });

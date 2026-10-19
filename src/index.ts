@@ -6,9 +6,15 @@
 export { SmartApiClient } from './core/SmartApiClient';
 export { createApi, configureApi, getDefaultApi, api } from './core/config';
 export { QueryManager } from './core/QueryManager';
+export { defineApi, isDefinedEndpoint, interpolateUrl } from './core/defineApi';
+export { applyPresets, withAuth, withCache, withOffline, PRESETS } from './core/presets';
+export { resolveMockResponse } from './core/mock';
+export { createEnvConfig, detectEnvironment } from './core/createEnvConfig';
+export { validateWithSchema } from './core/schema';
+export { openStream } from './core/stream';
 
 // Errors
-export { SmartApiError } from './core/types';
+export { SmartApiError, isTimeoutError } from './core/types';
 export { ErrorEngine } from './errors/ErrorEngine';
 export { HTTP_STATUS_MESSAGES, NETWORK_ERROR_MESSAGES } from './errors/errorMaps';
 
@@ -48,6 +54,8 @@ export { useGet } from './hooks/useGet';
 export { usePost } from './hooks/usePost';
 export { useMutation } from './hooks/useMutation';
 export { useInfiniteApi } from './hooks/useInfiniteApi';
+export { usePaginatedList } from './hooks/usePaginatedList';
+export { useSuspenseGet, clearSuspenseCache } from './hooks/useSuspenseGet';
 export { useUpload } from './hooks/useUpload';
 export { useDownload } from './hooks/useDownload';
 export { useOfflineQueue } from './hooks/useOfflineQueue';
@@ -69,20 +77,54 @@ export type {
   SmartApiRequestConfig,
   SmartApiResponse,
   SmartApiConfig,
+  GlobalErrorContext,
   RequestInterceptor,
   ResponseInterceptor,
   ErrorInterceptor,
   DeviceInfoProvider,
 } from './core/types';
 
-export type { UseApiOptions, UseApiState } from './hooks/useApi';
-export type { UseMutationOptions, UseMutationState } from './hooks/useMutation';
+export type {
+  EndpointDefinition,
+  EndpointCallOptions,
+  DefinedEndpoint,
+  DefinedApi,
+  DefineApiOptions,
+  PathParams,
+} from './core/defineApi';
+
+export type { PresetName } from './core/presets';
+export type { MockConfig, MockHandlerFn, MockHandlerResult } from './core/mock';
+export type { SchemaLike } from './core/schema';
+export type {
+  EnvConfigMap,
+  AppEnvironment,
+  CreateEnvConfigOptions,
+} from './core/createEnvConfig';
+export type { StreamOptions, StreamEvent, StreamHandle } from './core/stream';
+
+export type { UseApiOptions, UseApiState, PollWhen } from './hooks/useApi';
+export type {
+  UseSuspenseGetOptions,
+  UseSuspenseGetState,
+} from './hooks/useSuspenseGet';
+export type {
+  UseMutationOptions,
+  UseMutationState,
+  OptimisticUpdateConfig,
+} from './hooks/useMutation';
 export type {
   UseInfiniteApiOptions,
   UseInfiniteApiState,
   PageParam,
 } from './hooks/useInfiniteApi';
+export type {
+  UsePaginatedListOptions,
+  UsePaginatedListState,
+  PaginatedFlatListProps,
+} from './hooks/usePaginatedList';
 export type { UseUploadOptions, UseUploadState } from './hooks/useUpload';
 export type { UseDownloadOptions, UseDownloadState } from './hooks/useDownload';
 export type { UseOfflineQueueOptions, UseOfflineQueueState } from './hooks/useOfflineQueue';
 export type { UseRequestLogOptions } from './hooks/useRequestLog';
+export type { UrlInput } from './hooks/resolveEndpoint';

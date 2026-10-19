@@ -51,14 +51,22 @@ export function createTestClient(options: CreateTestClientOptions = {}): TestCli
     const fullUrl = String(input);
     const method = (init?.method ?? 'GET').toUpperCase();
 
-    const match = handlers.find((h) => {
-      const methodOk = !h.method || h.method.toUpperCase() === method;
-      const urlOk =
-        typeof h.url === 'string'
-          ? fullUrl.includes(h.url)
-          : h.url.test(fullUrl);
-      return methodOk && urlOk;
-    });
+    // Prefer the longest string match so `/users/7` wins over `/users`.
+    const candidates = handlers
+      .map((h) => {
+        const methodOk = !h.method || h.method.toUpperCase() === method;
+        if (!methodOk) return null;
+        if (typeof h.url === 'string') {
+          if (!fullUrl.includes(h.url)) return null;
+          return { handler: h, score: h.url.length };
+        }
+        if (h.url.test(fullUrl)) return { handler: h, score: 1000 };
+        return null;
+      })
+      .filter(Boolean) as Array<{ handler: MockHandler; score: number }>;
+
+    candidates.sort((a, b) => b.score - a.score);
+    const match = candidates[0]?.handler;
 
     if (!match) {
       return {

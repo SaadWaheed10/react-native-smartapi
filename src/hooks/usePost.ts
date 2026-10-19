@@ -1,5 +1,6 @@
 import { useApi } from './useApi';
 import type { UseApiOptions, UseApiState } from './useApi';
+import type { UrlInput } from './resolveEndpoint';
 
 /**
  * Convenience wrapper around `useApi` fixed to POST. Skips the automatic
@@ -7,9 +8,14 @@ import type { UseApiOptions, UseApiState } from './useApi';
  * action) — call `refetch()` to fire the request.
  */
 export function usePost<T = any>(
-  url: string | null,
+  urlOrEndpoint: UrlInput,
   data?: any,
   options: Omit<UseApiOptions, 'method' | 'data'> = {}
 ): UseApiState<T> {
-  return useApi<T>(url, { ...options, method: 'POST', data, skip: options.skip ?? true });
+  return useApi<T>(urlOrEndpoint, {
+    ...options,
+    method: 'POST',
+    data,
+    skip: options.skip ?? true,
+  });
 }

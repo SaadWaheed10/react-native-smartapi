@@ -126,6 +126,11 @@ export class SmartApiError extends Error implements SmartApiErrorShape {
     Object.setPrototypeOf(this, SmartApiError.prototype);
   }
 
+  /** True when this error represents a request timeout. */
+  get isTimeout(): boolean {
+    return this.type === 'TIMEOUT_ERROR' || this.code === 'TIMEOUT';
+  }
+
   toJSON(): SmartApiErrorShape {
     return {
       code: this.code,
@@ -137,6 +142,11 @@ export class SmartApiError extends Error implements SmartApiErrorShape {
   }
 }
 
+/** Type guard for timeout errors. */
+export function isTimeoutError(error: unknown): error is SmartApiError {
+  return error instanceof SmartApiError && error.isTimeout;
+}
+
 export interface SmartApiRequestConfig {
   method?: HttpMethod;
   url: string;
@@ -145,10 +155,20 @@ export interface SmartApiRequestConfig {
   params?: Record<string, any>;
   data?: any;
   timeout?: number;
+  /**
+   * Friendly message used when this request times out.
+   * Overrides the default "The request timed out…" copy.
+   */
+  timeoutMessage?: string;
   /** Dot-path (e.g. "data.users" or "profile.name") to auto-extract from the response body. */
   select?: string;
   /** Transform function applied to the (optionally selected) response data. */
   transform?: (data: any) => any;
+  /**
+   * Optional runtime schema (Zod or any `{ parse }` / `{ safeParse }` object).
+   * Validated after `select` / `transform`. Throws `VALIDATION_ERROR` on mismatch.
+   */
+  schema?: import('./schema').SchemaLike;
   cache?: CacheConfig | boolean;
   retry?: RetryConfig | boolean;
   /** Skip auth header injection for this request. */
@@ -202,6 +222,10 @@ export interface DeviceInfoProvider {
   getDeviceId?: () => string | undefined;
 }
 
+export interface GlobalErrorContext {
+  config: SmartApiRequestConfig;
+}
+
 export interface SmartApiConfig {
   baseURL?: string;
   timeout?: number;
@@ -227,6 +251,25 @@ export interface SmartApiConfig {
    * is considered fresh and won't refetch on remount/focus. Default: 0.
    */
   staleTime?: number;
+  /**
+   * One-line config packs: `['json', 'retrySafe', 'offlineQueue', 'devLog']`.
+   * Applied before explicit options (explicit wins on conflicts).
+   */
+  presets?: import('./presets').PresetName[];
+  /**
+   * Dev / UI mock layer. When enabled, matching handlers short-circuit the network.
+   * See `MockConfig` for handler key format (`"GET /users"`).
+   */
+  mock?: import('./mock').MockConfig;
+  /**
+   * Global UI bridge for errors (toasts, analytics). Skips `CANCELLED`.
+   * Prefer this over per-screen try/catch for user-facing messages.
+   */
+  onError?: (error: SmartApiError, ctx: GlobalErrorContext) => void | Promise<void>;
+  /** Called when a mutation is queued because the device is offline. */
+  onQueued?: (config: SmartApiRequestConfig) => void | Promise<void>;
+  /** Optional global success hook (analytics, silent logging). */
+  onSuccess?: (response: SmartApiResponse) => void | Promise<void>;
   requestInterceptors?: RequestInterceptor[];
   responseInterceptors?: ResponseInterceptor[];
   errorInterceptors?: ErrorInterceptor[];

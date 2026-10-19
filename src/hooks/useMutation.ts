@@ -1,13 +1,31 @@
 import { useCallback, useState } from 'react';
 import { getDefaultApi } from '../core/config';
+import type { PathParams } from '../core/defineApi';
 import type { SmartApiClient } from '../core/SmartApiClient';
 import type { HttpMethod, SmartApiError, SmartApiRequestConfig } from '../core/types';
+import { resolveEndpoint, type UrlInput } from './resolveEndpoint';
+
+export interface OptimisticUpdateConfig<TQuery = any, TVars = any> {
+  /**
+   * Query key / URL / prefix to update (e.g. `'/todos'` or `'GET:/todos'`).
+   * Active `useGet` / `useApi` hooks matching this key update immediately.
+   */
+  key: string;
+  /** Produce the next cached value from the previous one + mutation variables. */
+  update: (old: TQuery | undefined, variables: TVars) => TQuery;
+  /** Restore previous data if the mutation fails. Default: true. */
+  rollbackOnError?: boolean;
+}
 
 export interface UseMutationOptions extends Omit<SmartApiRequestConfig, 'url' | 'method' | 'data'> {
   method?: Extract<HttpMethod, 'POST' | 'PUT' | 'PATCH' | 'DELETE'>;
   client?: SmartApiClient;
+  /** Path params for `defineApi` endpoints with `:id` placeholders. */
+  pathParams?: PathParams;
   /** After success, invalidate matching query keys/prefixes so hooks refetch. */
   invalidateKeys?: string[];
+  /** Instantly update matching queries before the server responds. */
+  optimisticUpdate?: OptimisticUpdateConfig;
   onSuccess?: (data: any) => void;
   onError?: (error: SmartApiError) => void;
   onQueued?: () => void;
@@ -30,22 +48,33 @@ export interface UseMutationState<T> {
  *   const { mutate, loading, error, queued } = useMutation('/users', {
  *     method: 'POST',
  *     invalidateKeys: ['/users'],
+ *     optimisticUpdate: {
+ *       key: '/users',
+ *       update: (old, vars) => [...(old ?? []), { id: 'temp', ...vars }],
+ *     },
  *   });
  *   await mutate({ name: 'Ada' });
  */
 export function useMutation<T = any>(
-  url: string,
+  urlOrEndpoint: UrlInput,
   options: UseMutationOptions = {}
 ): UseMutationState<T> {
   const {
-    method = 'POST',
+    method: methodOption = 'POST',
     client,
+    pathParams,
     invalidateKeys,
+    optimisticUpdate,
     onSuccess,
     onError,
     onQueued,
     ...requestConfig
   } = options;
+
+  const { url, method } = resolveEndpoint(urlOrEndpoint, {
+    pathParams,
+    method: methodOption,
+  });
 
   const [data, setData] = useState<T | undefined>(undefined);
   const [loading, setLoading] = useState(false);
@@ -55,14 +84,31 @@ export function useMutation<T = any>(
   const mutate = useCallback(
     async (mutationData?: any, overrideUrl?: string): Promise<T | undefined> => {
       const apiClient = client ?? getDefaultApi();
+      const requestUrl = overrideUrl ?? url;
+      if (!requestUrl) {
+        throw new Error('useMutation requires a URL or defineApi endpoint');
+      }
+
       setLoading(true);
       setError(undefined);
       setQueued(false);
 
+      let previous: any;
+      let didOptimistic = false;
+
+      if (optimisticUpdate) {
+        const result = apiClient.queries.updateData(
+          optimisticUpdate.key,
+          (old) => optimisticUpdate.update(old, mutationData)
+        );
+        previous = result.previous;
+        didOptimistic = true;
+      }
+
       try {
         const response = await apiClient.request<T>({
           ...requestConfig,
-          url: overrideUrl ?? url,
+          url: requestUrl,
           method,
           data: mutationData,
         });
@@ -84,6 +130,15 @@ export function useMutation<T = any>(
           onQueued?.();
           return undefined;
         }
+
+        if (
+          didOptimistic &&
+          optimisticUpdate &&
+          optimisticUpdate.rollbackOnError !== false
+        ) {
+          apiClient.queries.setData(optimisticUpdate.key, previous);
+        }
+
         setError(smartError);
         onError?.(smartError);
         throw smartError;

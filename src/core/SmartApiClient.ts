@@ -29,6 +29,10 @@ import { createFormData } from '../utils/formData';
 import { QueryManager } from './QueryManager';
 import { RequestLog } from '../devtools/RequestLog';
 import { shouldUseXhr, xhrRequest } from './transports/xhrTransport';
+import { applyPresets } from './presets';
+import { resolveMockResponse } from './mock';
+import { validateWithSchema } from './schema';
+import { openStream, type StreamOptions, type StreamHandle } from './stream';
 
 const DEFAULT_TIMEOUT = 30000;
 
@@ -48,7 +52,8 @@ export class SmartApiClient {
   private responseInterceptors: ResponseInterceptor[] = [];
   private errorInterceptors: ErrorInterceptor[] = [];
 
-  constructor(config: SmartApiConfig = {}) {
+  constructor(rawConfig: SmartApiConfig = {}) {
+    const config = applyPresets(rawConfig.presets, rawConfig);
     this.config = config;
     this.logger = new Logger(config.logger);
     this.errorEngine = new ErrorEngine(config.errorMap);
@@ -84,12 +89,25 @@ export class SmartApiClient {
   // ---------------------------------------------------------------------
 
   configure(partial: Partial<SmartApiConfig>): void {
-    this.config = deepMerge(this.config, partial);
-    if (partial.auth) this.tokenManager.updateConfig(partial.auth);
-    if (partial.errorMap) this.errorEngine.setGlobalErrorMap(partial.errorMap);
-    if (partial.logger) this.logger = new Logger({ ...this.config.logger, ...partial.logger });
-    if (partial.offline) this.offlineQueue.updateConfig(partial.offline);
-    if (partial.devtools) this.requestLog.setEnabled(!!partial.devtools.enabled);
+    const withPresets = partial.presets
+      ? applyPresets(partial.presets, partial)
+      : partial;
+    this.config = deepMerge(this.config, withPresets);
+    if (withPresets.auth || partial.auth) {
+      this.tokenManager.updateConfig(this.config.auth ?? {});
+    }
+    if (withPresets.errorMap || partial.errorMap) {
+      this.errorEngine.setGlobalErrorMap(this.config.errorMap ?? {});
+    }
+    if (withPresets.logger || partial.logger) {
+      this.logger = new Logger(this.config.logger);
+    }
+    if (withPresets.offline || partial.offline) {
+      this.offlineQueue.updateConfig(this.config.offline);
+    }
+    if (withPresets.devtools || partial.devtools) {
+      this.requestLog.setEnabled(!!this.config.devtools?.enabled);
+    }
   }
 
   useRequestInterceptor(interceptor: RequestInterceptor): () => void {
@@ -158,6 +176,20 @@ export class SmartApiClient {
       this.cacheManager.invalidatePrefix(`GET:${keyOrPrefix}`);
     }
     this.queryManager.invalidate(keyOrPrefix);
+  }
+
+  /**
+   * Optimistically set query data for active hooks (and the in-memory query store).
+   *
+   *   api.setQueryData('/todos', (old) => [...(old ?? []), newTodo])
+   *   api.setQueryData('GET:/todos', updatedList)
+   */
+  setQueryData<T = any>(key: string, dataOrUpdater: T | ((old: T | undefined) => T)): void {
+    if (typeof dataOrUpdater === 'function') {
+      this.queryManager.updateData(key, dataOrUpdater as (old: T | undefined) => T);
+      return;
+    }
+    this.queryManager.setData(key, dataOrUpdater);
   }
 
   // ---------------------------------------------------------------------
@@ -246,6 +278,24 @@ export class SmartApiClient {
     });
   }
 
+  /**
+   * Open an SSE / chunked stream:
+   *
+   *   const stream = api.stream('/events', {
+   *     parseJson: true,
+   *     onMessage: (data) => console.log(data),
+   *   });
+   *   // later: stream.abort();
+   *   await stream.done;
+   */
+  stream(url: string, options: StreamOptions = {}): StreamHandle {
+    return openStream(this.config.baseURL, url, {
+      ...options,
+      headers: { ...this.config.headers, ...options.headers },
+      timeout: options.timeout ?? this.config.timeout,
+    });
+  }
+
   // ---------------------------------------------------------------------
   // Core request pipeline
   // ---------------------------------------------------------------------
@@ -273,6 +323,29 @@ export class SmartApiClient {
     const logId = this.requestLog.start(config);
 
     try {
+      // Mock layer (UI / offline-dev) — short-circuits the network when matched.
+      try {
+        const mocked = await resolveMockResponse<T>(config, this.config.mock);
+        if (mocked) {
+          if (isGet && cacheConfig.enabled) {
+            await this.cacheManager.set(cacheKey, mocked.data, cacheConfig.ttl, cacheConfig.storage);
+          }
+          this.queryManager.remember(cacheKey, mocked.data);
+          this.requestLog.success(logId, mocked);
+          void this.config.onSuccess?.(mocked);
+          return mocked;
+        }
+      } catch (mockErr: any) {
+        if (mockErr?.__smartApiMock) {
+          throw this.errorEngine.normalize({
+            status: mockErr.__smartApiMock.status,
+            body: mockErr.__smartApiMock.body,
+            errorMap: config.errorMap ?? this.config.errorMap,
+          });
+        }
+        throw mockErr;
+      }
+
       // Offline handling: queue mutations, or fall back to cache for reads.
       if (this.config.offline?.enabled) {
         await this.offlineQueue.ready();
@@ -280,6 +353,7 @@ export class SmartApiClient {
         if (!isOnline) {
           if (!isGet && this.config.offline.queueMutations) {
             const item = this.offlineQueue.enqueue(config);
+            void this.config.onQueued?.(config);
             if (this.config.offline.throwOnQueue === false) {
               const queuedResponse: SmartApiResponse<T> = {
                 data: undefined as any,
@@ -322,10 +396,12 @@ export class SmartApiClient {
             void this.executeWithRetry<T>(config)
               .then(async (res) => {
                 await this.cacheManager.set(cacheKey, res.data, cacheConfig.ttl, cacheConfig.storage);
+                this.queryManager.remember(cacheKey, res.data);
               })
               .catch(() => undefined);
           }
           const response = this.finalize<T>(cached, config, 200, {}, true);
+          this.queryManager.remember(cacheKey, cached);
           this.requestLog.success(logId, response);
           return response;
         }
@@ -337,6 +413,10 @@ export class SmartApiClient {
         await this.cacheManager.set(cacheKey, response.data, cacheConfig.ttl, cacheConfig.storage);
       }
 
+      if (isGet) {
+        this.queryManager.remember(cacheKey, response.data);
+      }
+
       // Invalidate cached GETs for the same resource after a mutation.
       if (!isGet) {
         const urlRoot = config.url.split('?')[0];
@@ -346,10 +426,14 @@ export class SmartApiClient {
       }
 
       this.requestLog.success(logId, response);
+      void this.config.onSuccess?.(response);
       return response;
     } catch (err) {
       if (err instanceof SmartApiError) {
         this.requestLog.failure(logId, err);
+        if (err.type !== 'CANCELLED' && err.code !== 'REQUEST_QUEUED_OFFLINE') {
+          void this.config.onError?.(err, { config });
+        }
       }
       throw err;
     }
@@ -409,8 +493,12 @@ export class SmartApiClient {
   private async executeOnce<T>(config: SmartApiRequestConfig): Promise<SmartApiResponse<T>> {
     const fullUrl = joinUrl(config.baseURL, config.url) + buildQueryString(config.params);
     const controller = new AbortController();
+    let timedOut = false;
     const timeoutId = config.timeout
-      ? setTimeout(() => controller.abort(), config.timeout)
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, config.timeout)
       : undefined;
 
     if (config.signal) {
@@ -428,10 +516,22 @@ export class SmartApiClient {
       }
       return await this.executeWithFetch<T>(fullUrl, config, headers, body, controller.signal);
     } catch (err) {
+      if (timedOut || (err as any)?.name === 'TimeoutError') {
+        throw this.errorEngine.normalize({
+          timedOut: true,
+          timeoutMessage: config.timeoutMessage,
+          raw: err,
+        });
+      }
       if (controller.signal.aborted) {
         throw this.errorEngine.normalize({ aborted: true });
       }
-      throw err instanceof SmartApiError ? err : this.errorEngine.normalize({ raw: err });
+      throw err instanceof SmartApiError
+        ? err
+        : this.errorEngine.normalize({
+            raw: err,
+            timeoutMessage: config.timeoutMessage,
+          });
     } finally {
       clearTimeout(timeoutId);
     }
@@ -608,9 +708,10 @@ export class SmartApiClient {
   ): SmartApiResponse<T> {
     const selected = selectData(rawData, config.select);
     const transformed = applyTransform<any, T>(selected, config.transform as any);
+    const data = validateWithSchema<T>(transformed, config.schema as any);
 
     return {
-      data: transformed,
+      data,
       status,
       headers,
       ok: status >= 200 && status < 300,

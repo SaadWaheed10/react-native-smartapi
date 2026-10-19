@@ -24,8 +24,19 @@ const { data, loading, error, refetch } = useGet('/users', {
 - 📦 **Built-in caching** — memory or persistent (AsyncStorage), TTL, cache-first / network-first / stale-while-revalidate.
 - 📡 **Offline-first** — queues mutations while offline, **persists across app restarts**, flushes on reconnect; `useOfflineQueue()` for UI.
 - 🎯 **Query DX** — request dedupe, `staleTime`, `refetchOnFocus`, `api.invalidate()`, `isFetching`.
+- 🗺 **`defineApi`** — declare typed endpoints once (`/users/:id`) and reuse in client + hooks.
+- ✨ **Optimistic updates** — instant UI via `useMutation({ optimisticUpdate })` + `api.setQueryData`.
+- 🔔 **Global UI bridges** — `onError` / `onQueued` / `onSuccess` for toasts & analytics.
+- 📋 **`usePaginatedList`** — FlatList-ready infinite lists (`flatListProps`).
+- 🎛 **Presets** — one-line packs: `json`, `retrySafe`, `offlineQueue`, `devLog`, `cacheShort`.
+- 🎭 **Mock mode** — build UI without a backend (`mock.handlers`).
+- ⏱ **Smart polling** — `pollWhen` / `pollWhile` (pause in background or when done).
+- 🪄 **Suspense** — `useSuspenseGet` for React 18 Suspense + Error Boundaries.
+- 📡 **Streaming / SSE** — `api.stream()` with `onMessage` / `parseJson`.
+- ✅ **Schema validation** — optional Zod (or any `parse`/`safeParse`) via `schema`.
+- 🌍 **Env configs** — `createEnvConfig({ development, staging, production })`.
 - 🪄 **Transform / select** — pull nested fields and reshape responses.
-- ⚛️ **React hooks** — `useApi`, `useGet`, `usePost`, `useMutation`, `useInfiniteApi`, `useUpload`, `useDownload`, `useOfflineQueue`, `useRequestLog`.
+- ⚛️ **React hooks** — `useApi`, `useGet`, `usePost`, `useMutation`, `useInfiniteApi`, `usePaginatedList`, `useSuspenseGet`, `useUpload`, `useDownload`, `useOfflineQueue`, `useRequestLog`.
 - 📈 **Real upload/download progress** — automatic XHR transport when progress callbacks are set.
 - 🧪 **Testing helpers** — `createTestClient` via `react-native-smartapi/testing`.
 - 🧵 **Cancellation** — `AbortController` under the hood.
@@ -74,7 +85,7 @@ import { configureApi } from 'react-native-smartapi';
 configureApi({
   baseURL: 'https://api.example.com',
   timeout: 15000,
-  staleTime: 15_000,
+  presets: ['json', 'retrySafe', 'offlineQueue', 'cacheShort', 'devLog'],
   auth: {
     getToken: () => SecureStore.getAccessToken(),
     onRefreshToken: async () => SecureStore.refreshAccessToken(),
@@ -83,11 +94,19 @@ configureApi({
       // navigate to login
     },
   },
-  cache: { enabled: true, ttl: 5 * 60 * 1000 },
-  retry: { enabled: true, attempts: 3 },
-  offline: { enabled: true, queueMutations: true, fallbackToCache: true, persist: true },
-  logger: { enabled: __DEV__, level: 'debug' },
-  devtools: { enabled: __DEV__ },
+  onError: (err) => {
+    if (err.type !== 'CANCELLED') Toast.show(err.message);
+  },
+  onQueued: () => Toast.show('Saved offline — will sync later'),
+  mock: __DEV__
+    ? {
+        enabled: false, // flip to true while designing screens
+        delay: 400,
+        handlers: {
+          'GET /users': [{ id: 1, name: 'Ada' }],
+        },
+      }
+    : undefined,
   errorMap: {
     USER_NOT_FOUND: 'User does not exist',
     INVALID_OTP: 'The code you entered is incorrect',
@@ -146,12 +165,81 @@ api.upload(url, { file }, extraFields?, config?)
 api.download(url, config?)
 ```
 
-### Invalidation
+### `defineApi` — typed endpoints
+
+```ts
+import { defineApi, useGet, useMutation } from 'react-native-smartapi';
+
+const usersApi = defineApi({
+  list: { method: 'GET', url: '/users' },
+  get: { method: 'GET', url: '/users/:id' },
+  create: { method: 'POST', url: '/users' },
+});
+
+await usersApi.list();
+await usersApi.get({ pathParams: { id: 1 } });
+await usersApi.create({ data: { name: 'Ada' } });
+
+useGet(usersApi.list);
+useGet(usersApi.get, { pathParams: { id: 1 } });
+useMutation(usersApi.create, { invalidateKeys: ['/users'] });
+```
+
+### Invalidation & optimistic cache
 
 ```ts
 api.invalidate('/users');        // cache + refetch matching hooks
 api.invalidate('GET:/users');
 api.invalidate();                // clear everything
+
+api.setQueryData('/todos', (old) => [...(old ?? []), { id: 'temp', title: 'New' }]);
+```
+
+```tsx
+const { mutate } = useMutation('/todos', {
+  method: 'POST',
+  invalidateKeys: ['/todos'],
+  optimisticUpdate: {
+    key: '/todos',
+    update: (old, vars) => [...(old ?? []), { id: 'temp', ...vars }],
+    rollbackOnError: true,
+  },
+});
+```
+
+### Presets
+
+```ts
+configureApi({
+  baseURL: 'https://api.example.com',
+  presets: ['json', 'retrySafe', 'offlineQueue', 'devLog', 'cacheShort'],
+});
+
+// Or compose manually:
+import { withAuth, withCache, withOffline } from 'react-native-smartapi';
+configureApi({
+  baseURL: 'https://api.example.com',
+  ...withAuth({ getToken }),
+  ...withCache({ ttl: 60_000 }),
+  ...withOffline(),
+});
+```
+
+### Mock mode (UI without a backend)
+
+```ts
+configureApi({
+  baseURL: 'https://api.example.com',
+  mock: {
+    enabled: __DEV__,
+    delay: 300,
+    handlers: {
+      'GET /users': [{ id: 1, name: 'Ada' }],
+      'GET /users/:id': (cfg) => ({ id: 1, name: 'Ada', url: cfg.url }),
+      'POST /users': { status: 201, data: { id: 2 } },
+    },
+  },
+});
 ```
 
 ### `select` / `transform`
@@ -224,7 +312,7 @@ const { size, queue, isOnline, flush, clear } = useOfflineQueue();
 
 Queued mutations throw `REQUEST_QUEUED_OFFLINE` by default (hooks set `queued: true`). Set `offline.throwOnQueue: false` to resolve with `{ queued: true }` instead.
 
-### Infinite scroll
+### Infinite scroll / FlatList preset
 
 ```tsx
 // Page numbers
@@ -240,11 +328,96 @@ const feed = useInfiniteApi('/feed', {
   getItems: (page) => page.items,
 });
 
-// Next URL
-const path = useInfiniteApi('/items', {
-  paginationMode: 'path',
-  getNextPageParam: (page) => page.next ?? null,
+// FlatList-ready (recommended for lists)
+const list = usePaginatedList('/posts', { pageSize: 20 });
+<FlatList
+  {...list.flatListProps}
+  renderItem={({ item }) => <PostRow post={item} />}
+/>
+```
+
+### Smart polling
+
+```tsx
+useGet('/orders/123', {
+  pollInterval: 5000,
+  pollWhen: 'foreground', // pause in background
+  pollWhile: (order) => order?.status === 'pending',
 });
+```
+
+### Suspense
+
+```tsx
+import { Suspense } from 'react';
+import { useSuspenseGet } from 'react-native-smartapi';
+
+function Users() {
+  const { data } = useSuspenseGet<User[]>('/users'); // data always defined
+  return <UserList users={data} />;
+}
+
+<Suspense fallback={<Spinner />}>
+  <ErrorBoundary>
+    <Users />
+  </ErrorBoundary>
+</Suspense>
+```
+
+### Streaming / SSE
+
+```ts
+const stream = api.stream('/events', {
+  parseJson: true,
+  onMessage: (data) => console.log('event', data),
+  onEvent: ({ event, data }) => {},
+});
+
+// later
+stream.abort();
+await stream.done;
+```
+
+### Schema validation (Zod optional)
+
+```ts
+import { z } from 'zod';
+
+const UserSchema = z.object({ id: z.number(), name: z.string() });
+
+await api.get('/me', { schema: UserSchema });
+useGet('/me', { schema: UserSchema });
+```
+
+### Multi-environment config
+
+```ts
+import { configureApi, createEnvConfig } from 'react-native-smartapi';
+
+configureApi(createEnvConfig({
+  shared: { timeout: 15000 },
+  development: {
+    baseURL: 'http://localhost:3000',
+    presets: ['devLog'],
+    mock: { enabled: true, handlers: { 'GET /users': [] } },
+  },
+  staging: { baseURL: 'https://staging.api.example.com' },
+  production: {
+    baseURL: 'https://api.example.com',
+    logger: { enabled: false },
+  },
+}));
+```
+
+### Timeout UX
+
+```ts
+const { error, isTimeout, refetch } = useGet('/heavy', {
+  timeout: 8000,
+  timeoutMessage: 'Still working… try again',
+});
+
+if (isTimeout) return <RetryBanner onRetry={refetch} />;
 ```
 
 ### Multiple API instances
@@ -289,8 +462,10 @@ api.restoreFetch();
 | Hook | Purpose |
 |---|---|
 | `useApi` / `useGet` / `usePost` | Fetch with loading/error/`staleTime`/`refetchOnFocus`/dedupe |
-| `useMutation` | Imperative mutate + `invalidateKeys` + `queued` |
+| `useMutation` | Imperative mutate + `invalidateKeys` + `optimisticUpdate` + `queued` |
 | `useInfiniteApi` | Page / cursor / next-URL pagination |
+| `usePaginatedList` | FlatList-ready infinite list (`flatListProps`) |
+| `useSuspenseGet` | Suspense GET — `data` is always defined |
 | `useUpload` / `useDownload` | File transfer with real progress |
 | `useOfflineQueue` | Observe & control the offline mutation queue |
 | `useRequestLog` | Subscribe to the dev request inspector |
