@@ -7,7 +7,10 @@ const DEFAULT_TTL = 5 * 60 * 1000; // 5 minutes
 export class CacheManager {
   private memory = new MemoryCache();
   private persistent = new PersistentCache();
-  private defaultConfig: Required<Pick<CacheConfig, 'enabled' | 'ttl' | 'storage' | 'policy'>>;
+  private etags = new Map<string, string>();
+  private defaultConfig: Required<
+    Pick<CacheConfig, 'enabled' | 'ttl' | 'storage' | 'policy' | 'etag'>
+  >;
 
   constructor(globalConfig: CacheConfig = {}) {
     this.defaultConfig = {
@@ -15,13 +18,16 @@ export class CacheManager {
       ttl: globalConfig.ttl ?? DEFAULT_TTL,
       storage: globalConfig.storage ?? 'memory',
       policy: globalConfig.policy ?? 'cache-first',
+      etag: globalConfig.etag ?? false,
     };
   }
 
   resolveConfig(perRequest?: CacheConfig | boolean): Required<
-    Pick<CacheConfig, 'enabled' | 'ttl' | 'storage' | 'policy'>
+    Pick<CacheConfig, 'enabled' | 'ttl' | 'storage' | 'policy' | 'etag'>
   > & { key?: string } {
-    if (perRequest === false) return { ...this.defaultConfig, enabled: false };
+    if (perRequest === false) {
+      return { ...this.defaultConfig, enabled: false };
+    }
     if (perRequest === true) return { ...this.defaultConfig, enabled: true };
     if (!perRequest) return this.defaultConfig;
     return {
@@ -29,8 +35,21 @@ export class CacheManager {
       ttl: perRequest.ttl ?? this.defaultConfig.ttl,
       storage: perRequest.storage ?? this.defaultConfig.storage,
       policy: perRequest.policy ?? this.defaultConfig.policy,
+      etag: perRequest.etag ?? this.defaultConfig.etag,
       key: perRequest.key,
     };
+  }
+
+  getEtag(key: string): string | undefined {
+    return this.etags.get(key);
+  }
+
+  setEtag(key: string, etag: string | undefined): void {
+    if (!etag) {
+      this.etags.delete(key);
+      return;
+    }
+    this.etags.set(key, etag);
   }
 
   async get<T = any>(key: string, storage: 'memory' | 'persistent'): Promise<T | undefined> {

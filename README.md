@@ -35,8 +35,20 @@ const { data, loading, error, refetch } = useGet('/users', {
 - 📡 **Streaming / SSE** — `api.stream()` with `onMessage` / `parseJson`.
 - ✅ **Schema validation** — optional Zod (or any `parse`/`safeParse`) via `schema`.
 - 🌍 **Env configs** — `createEnvConfig({ development, staging, production })`.
+- 📺 **`useScreenApi`** — declare every screen query/mutation in one object.
+- 📚 **`defineResource` / `useResource`** — REST CRUD in a few lines.
+- 📶 **Adaptive networking** — auto timeout/retry from wifi / cellular quality.
+- ⚡ **Circuit breaker** — stop hammering a dying API; optional fallback.
+- 🏷 **ETag revalidation** — `If-None-Match` + HTTP 304 cache hits.
+- 🥊 **Offline conflicts** — `server-wins` / `client-wins` / custom merge.
+- 🔄 **`useSyncMutation`** — optimistic + offline + conflict in one hook.
+- 🧭 **Nav prefetch** — `prefetchOnFocus` for React Navigation / Expo Router.
+- 🎬 **Replay export** — shareable JSON/HAR timelines for QA (`api.exportReplay()`).
+- 🌐 **Localized errors** — `locale` + `locales` message maps.
+- 🛡 **Privacy redact** — mask phones, emails, tokens in logs/replays.
+- ⏰ **Background sync** — Expo BackgroundFetch flush helper.
 - 🪄 **Transform / select** — pull nested fields and reshape responses.
-- ⚛️ **React hooks** — `useApi`, `useGet`, `usePost`, `useMutation`, `useInfiniteApi`, `usePaginatedList`, `useSuspenseGet`, `useUpload`, `useDownload`, `useOfflineQueue`, `useRequestLog`.
+- ⚛️ **React hooks** — `useApi`, `useGet`, `usePost`, `useMutation`, `useSyncMutation`, `useScreenApi`, `useResource`, `useInfiniteApi`, `usePaginatedList`, `useSuspenseGet`, `useUpload`, `useDownload`, `useOfflineQueue`, `useRequestLog`.
 - 📈 **Real upload/download progress** — automatic XHR transport when progress callbacks are set.
 - 🧪 **Testing helpers** — `createTestClient` via `react-native-smartapi/testing`.
 - 🧵 **Cancellation** — `AbortController` under the hood.
@@ -407,6 +419,103 @@ configureApi(createEnvConfig({
     logger: { enabled: false },
   },
 }));
+```
+
+### `useScreenApi` — one screen, all APIs
+
+```tsx
+const screen = useScreenApi({
+  user: ['GET', '/me'],
+  posts: ['GET', '/posts', { staleTime: 30_000 }],
+  create: ['POST', '/posts', { invalidateKeys: ['/posts'] }],
+});
+
+screen.user.data;
+await screen.create.mutate({ title: 'Hello' });
+```
+
+### `defineResource` / `useResource`
+
+```ts
+const posts = defineResource<Post>('/posts');
+await posts.list();
+await posts.get(1);
+await posts.create({ title: 'Hi' });
+
+const { list, createAndRefresh } = useResource(posts);
+```
+
+### Adaptive networking + circuit breaker
+
+```ts
+configureApi({
+  networkAware: true,
+  circuitBreaker: { threshold: 5, cooldownMs: 30_000, fallback: [] },
+});
+```
+
+### ETag cache revalidation
+
+```ts
+configureApi({ cache: { enabled: true, etag: true } });
+// Sends If-None-Match; HTTP 304 → instant cache hit
+```
+
+### Offline conflicts + `useSyncMutation`
+
+```ts
+configureApi({
+  offline: { enabled: true, onConflict: 'client-wins' },
+});
+
+const { mutate, queued, conflict, sync } = useSyncMutation('/todos', {
+  method: 'POST',
+  optimisticUpdate: {
+    key: '/todos',
+    update: (old, vars) => [...(old ?? []), vars],
+  },
+  onConflict: 'client-wins',
+});
+```
+
+### Navigation prefetch
+
+```ts
+prefetchOnFocus(navigation, {
+  PostDetail: ({ params }) => ({ url: `/posts/${params.id}`, method: 'GET' }),
+  Feed: () => [{ url: '/feed' }, { url: '/stories' }],
+});
+```
+
+### Replay export + privacy redact
+
+```ts
+configureApi({
+  devtools: { enabled: true },
+  logger: { redact: ['phone', 'cnic', /\b\d{16}\b/] },
+});
+
+const json = api.exportReplay();
+const har = api.exportReplay({ format: 'har' });
+```
+
+### Localized errors
+
+```ts
+configureApi({
+  locale: 'ur',
+  locales: {
+    ur: { NO_INTERNET: 'انٹرنیٹ دستیاب نہیں', TIMEOUT: 'درخواست کا وقت ختم' },
+  },
+});
+```
+
+### Background sync
+
+```ts
+import { registerBackgroundSync } from 'react-native-smartapi';
+
+await registerBackgroundSync({ intervalMinutes: 15 });
 ```
 
 ### Timeout UX

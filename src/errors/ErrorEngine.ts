@@ -27,6 +27,8 @@ export interface NormalizeErrorOptions {
  */
 export class ErrorEngine {
   private globalErrorMap: Record<string, string>;
+  private locale?: string;
+  private locales: Record<string, Record<string, string>> = {};
 
   constructor(globalErrorMap: Record<string, string> = {}) {
     this.globalErrorMap = globalErrorMap;
@@ -36,12 +38,28 @@ export class ErrorEngine {
     this.globalErrorMap = { ...this.globalErrorMap, ...map };
   }
 
+  setLocale(locale?: string, locales?: Record<string, Record<string, string>>) {
+    if (locale !== undefined) this.locale = locale;
+    if (locales) this.locales = { ...this.locales, ...locales };
+  }
+
+  /** Resolve a localized message for an error code, if configured. */
+  localize(code: string, fallback: string): string {
+    if (this.locale && this.locales[this.locale]?.[code]) {
+      return this.locales[this.locale][code];
+    }
+    return fallback;
+  }
+
   normalize(options: NormalizeErrorOptions): SmartApiError {
     if (options.timedOut) {
       return new SmartApiError({
         code: 'TIMEOUT',
         status: 0,
-        message: options.timeoutMessage ?? NETWORK_ERROR_MESSAGES.TIMEOUT,
+        message: this.localize(
+          'TIMEOUT',
+          options.timeoutMessage ?? NETWORK_ERROR_MESSAGES.TIMEOUT
+        ),
         type: 'TIMEOUT_ERROR',
       });
     }
@@ -50,7 +68,7 @@ export class ErrorEngine {
       return new SmartApiError({
         code: 'REQUEST_CANCELLED',
         status: 0,
-        message: NETWORK_ERROR_MESSAGES.REQUEST_CANCELLED,
+        message: this.localize('REQUEST_CANCELLED', NETWORK_ERROR_MESSAGES.REQUEST_CANCELLED),
         type: 'CANCELLED',
       });
     }
@@ -89,10 +107,12 @@ export class ErrorEngine {
     if (status === 401 || status === 403) type = 'AUTH_ERROR';
     if (status === 422) type = 'VALIDATION_ERROR';
 
+    const code = backendCode ?? `HTTP_${status}`;
+    const resolved = message ?? getHttpErrorMessage(status);
     return new SmartApiError({
-      code: backendCode ?? `HTTP_${status}`,
+      code,
       status,
-      message: message ?? getHttpErrorMessage(status),
+      message: this.localize(code, resolved),
       type,
       details: body,
     });
@@ -135,7 +155,7 @@ export class ErrorEngine {
       return new SmartApiError({
         code: 'NO_INTERNET',
         status: 0,
-        message: NETWORK_ERROR_MESSAGES.NO_INTERNET,
+        message: this.localize('NO_INTERNET', NETWORK_ERROR_MESSAGES.NO_INTERNET),
         type: 'NETWORK_ERROR',
         details: err,
       });

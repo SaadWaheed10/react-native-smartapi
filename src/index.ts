@@ -7,11 +7,14 @@ export { SmartApiClient } from './core/SmartApiClient';
 export { createApi, configureApi, getDefaultApi, api } from './core/config';
 export { QueryManager } from './core/QueryManager';
 export { defineApi, isDefinedEndpoint, interpolateUrl } from './core/defineApi';
+export { defineResource } from './core/defineResource';
 export { applyPresets, withAuth, withCache, withOffline, PRESETS } from './core/presets';
 export { resolveMockResponse } from './core/mock';
 export { createEnvConfig, detectEnvironment } from './core/createEnvConfig';
 export { validateWithSchema } from './core/schema';
 export { openStream } from './core/stream';
+export { CircuitBreaker } from './core/CircuitBreaker';
+export { adaptiveOverrides, qualityFromNetInfoState } from './core/adaptiveNetwork';
 
 // Errors
 export { SmartApiError, isTimeoutError } from './core/types';
@@ -33,6 +36,10 @@ export { TokenManager } from './auth/TokenManager';
 export { NetworkMonitor } from './offline/NetworkMonitor';
 export { OfflineQueue } from './offline/OfflineQueue';
 export type { QueuedRequest } from './offline/OfflineQueue';
+export { registerBackgroundSync } from './offline/backgroundSync';
+
+// Navigation
+export { prefetchOnFocus, prefetch } from './navigation/prefetchOnFocus';
 
 // Transform / selection helpers
 export { selectData } from './transform/DataSelector';
@@ -53,9 +60,12 @@ export { useApi } from './hooks/useApi';
 export { useGet } from './hooks/useGet';
 export { usePost } from './hooks/usePost';
 export { useMutation } from './hooks/useMutation';
+export { useSyncMutation } from './hooks/useSyncMutation';
 export { useInfiniteApi } from './hooks/useInfiniteApi';
 export { usePaginatedList } from './hooks/usePaginatedList';
 export { useSuspenseGet, clearSuspenseCache } from './hooks/useSuspenseGet';
+export { useScreenApi } from './hooks/useScreenApi';
+export { useResource } from './hooks/useResource';
 export { useUpload } from './hooks/useUpload';
 export { useDownload } from './hooks/useDownload';
 export { useOfflineQueue } from './hooks/useOfflineQueue';
@@ -69,6 +79,7 @@ export type {
   RetryConfig,
   AuthConfig,
   OfflineConfig,
+  ConflictStrategy,
   LoggerConfig,
   DevtoolsConfig,
   TransportType,
@@ -93,6 +104,7 @@ export type {
   PathParams,
 } from './core/defineApi';
 
+export type { ResourceApi, DefineResourceOptions } from './core/defineResource';
 export type { PresetName } from './core/presets';
 export type { MockConfig, MockHandlerFn, MockHandlerResult } from './core/mock';
 export type { SchemaLike } from './core/schema';
@@ -102,6 +114,10 @@ export type {
   CreateEnvConfigOptions,
 } from './core/createEnvConfig';
 export type { StreamOptions, StreamEvent, StreamHandle } from './core/stream';
+export type { CircuitBreakerConfig, CircuitState } from './core/CircuitBreaker';
+export type { NetworkQuality, AdaptiveOverrides } from './core/adaptiveNetwork';
+export type { PrefetchLoader, PrefetchOnFocusOptions } from './navigation/prefetchOnFocus';
+export type { BackgroundSyncOptions, BackgroundSyncHandle } from './offline/backgroundSync';
 
 export type { UseApiOptions, UseApiState, PollWhen } from './hooks/useApi';
 export type {
@@ -114,6 +130,10 @@ export type {
   OptimisticUpdateConfig,
 } from './hooks/useMutation';
 export type {
+  UseSyncMutationOptions,
+  UseSyncMutationState,
+} from './hooks/useSyncMutation';
+export type {
   UseInfiniteApiOptions,
   UseInfiniteApiState,
   PageParam,
@@ -123,6 +143,12 @@ export type {
   UsePaginatedListState,
   PaginatedFlatListProps,
 } from './hooks/usePaginatedList';
+export type {
+  ScreenDef,
+  ScreenQuerySlice,
+  ScreenMutationSlice,
+} from './hooks/useScreenApi';
+export type { UseResourceOptions, UseResourceState } from './hooks/useResource';
 export type { UseUploadOptions, UseUploadState } from './hooks/useUpload';
 export type { UseDownloadOptions, UseDownloadState } from './hooks/useDownload';
 export type { UseOfflineQueueOptions, UseOfflineQueueState } from './hooks/useOfflineQueue';

@@ -23,6 +23,11 @@ export interface CacheConfig {
   policy?: CachePolicy;
   /** Explicit cache key override. Defaults to method + url + params. */
   key?: string;
+  /**
+   * Send `If-None-Match` with the last ETag and treat HTTP 304 as a cache hit.
+   * Default: false (enable globally via `cache.etag: true` or per-request).
+   */
+  etag?: boolean;
 }
 
 export interface RetryConfig {
@@ -54,6 +59,17 @@ export interface AuthConfig {
   maxRefreshAttempts?: number;
 }
 
+/** How to resolve HTTP 409 conflicts when flushing the offline queue / sync mutations. */
+export type ConflictStrategy =
+  | 'server-wins'
+  | 'client-wins'
+  | 'ask'
+  | ((ctx: {
+      config: SmartApiRequestConfig;
+      error: SmartApiError;
+      server: any;
+    }) => any | Promise<any>);
+
 export interface OfflineConfig {
   enabled?: boolean;
   /** Queue mutating requests (POST/PUT/PATCH/DELETE) while offline and flush on reconnect. */
@@ -72,6 +88,11 @@ export interface OfflineConfig {
    * When false, they resolve with `{ queued: true, ok: false, status: 0 }`.
    */
   throwOnQueue?: boolean;
+  /**
+   * Conflict strategy when a flushed mutation returns 409.
+   * Default: `'server-wins'` (drop the queued client change).
+   */
+  onConflict?: ConflictStrategy;
 }
 
 export interface DevtoolsConfig {
@@ -88,6 +109,13 @@ export interface LoggerConfig {
   maskSensitiveData?: boolean;
   /** Additional key names to mask. */
   sensitiveKeys?: string[];
+  /**
+   * Extra privacy redaction — string keys and/or RegExp matched against string values
+   * (phones, emails, national IDs, etc.).
+   *
+   *   redact: ['phone', 'cnic', /\\b\\d{16}\\b/]
+   */
+  redact?: Array<string | RegExp>;
   level?: 'debug' | 'info' | 'warn' | 'error' | 'silent';
 }
 
@@ -251,6 +279,27 @@ export interface SmartApiConfig {
    * is considered fresh and won't refetch on remount/focus. Default: 0.
    */
   staleTime?: number;
+  /**
+   * Auto-tune timeout/retry from NetInfo quality (wifi / cellular / 2G).
+   * Default: false.
+   */
+  networkAware?: boolean;
+  /**
+   * Circuit breaker — stop hammering a failing API after N errors.
+   * Set `true` for defaults, or pass `{ threshold, cooldownMs, fallback }`.
+   */
+  circuitBreaker?: boolean | import('./CircuitBreaker').CircuitBreakerConfig;
+  /**
+   * Active locale for error messages. Used with `locales` map.
+   * Example: `'ur'`, `'en'`, `'ar'`.
+   */
+  locale?: string;
+  /**
+   * Localized error message maps keyed by locale then error code.
+   *
+   *   locales: { ur: { NO_INTERNET: 'انٹرنیٹ دستیاب نہیں' } }
+   */
+  locales?: Record<string, Record<string, string>>;
   /**
    * One-line config packs: `['json', 'retrySafe', 'offlineQueue', 'devLog']`.
    * Applied before explicit options (explicit wins on conflicts).

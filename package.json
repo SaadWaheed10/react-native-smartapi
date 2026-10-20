@@ -1,7 +1,7 @@
 {
   "name": "react-native-smartapi",
-  "version": "1.3.0",
-  "description": "Enterprise-grade API layer for React Native and Expo. Typed endpoints, Suspense, streaming, Zod validation, optimistic updates, offline queue, mock mode, and React hooks — no Axios required.",
+  "version": "1.4.0",
+  "description": "Enterprise-grade API layer for React Native and Expo. Screen APIs, adaptive networking, circuit breaker, ETag, offline conflicts, resources, Suspense, streaming, and React hooks — no Axios required.",
   "main": "lib/commonjs/index.js",
   "module": "lib/module/index.js",
   "types": "lib/typescript/index.d.ts",

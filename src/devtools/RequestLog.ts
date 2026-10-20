@@ -80,6 +80,66 @@ export class RequestLog {
     this.emit();
   }
 
+  /**
+   * Export a shareable replay timeline (JSON / lightweight HAR-like).
+   * Pass a `redact` fn (e.g. `logger.redact`) to strip secrets before sharing.
+   */
+  exportReplay(options: {
+    format?: 'json' | 'har';
+    redact?: (value: any) => any;
+    limit?: number;
+  } = {}): string {
+    const limit = options.limit ?? this.entries.length;
+    const entries = this.entries.slice(0, limit).map((entry) => {
+      const request = options.redact ? options.redact(entry.request) : entry.request;
+      return { ...entry, request };
+    });
+
+    if (options.format === 'har') {
+      return JSON.stringify(
+        {
+          log: {
+            version: '1.2',
+            creator: { name: 'react-native-smartapi', version: '1.4.0' },
+            entries: entries.map((e) => ({
+              startedDateTime: new Date(e.startedAt).toISOString(),
+              time: e.durationMs ?? 0,
+              request: {
+                method: e.method,
+                url: e.url,
+                headers: Object.entries(e.request.headers ?? {}).map(([name, value]) => ({
+                  name,
+                  value,
+                })),
+                postData: e.request.data
+                  ? { text: JSON.stringify(e.request.data) }
+                  : undefined,
+              },
+              response: {
+                status: e.status ?? 0,
+                statusText: e.error?.code ?? '',
+                headers: [],
+                content: { text: e.error ? e.error.message : '' },
+              },
+            })),
+          },
+        },
+        null,
+        2
+      );
+    }
+
+    return JSON.stringify(
+      {
+        exportedAt: new Date().toISOString(),
+        count: entries.length,
+        entries,
+      },
+      null,
+      2
+    );
+  }
+
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
     listener(this.getEntries());

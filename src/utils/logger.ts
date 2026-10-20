@@ -15,26 +15,55 @@ const DEFAULT_SENSITIVE_KEYS = [
   'ssn',
   'creditCard',
   'card_number',
+  'phone',
+  'email',
+  'cnic',
+];
+
+const DEFAULT_VALUE_PATTERNS: RegExp[] = [
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i, // email
+  /\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/, // phone-ish
+  /\b\d{13,19}\b/, // long numeric (cards)
 ];
 
 export class Logger {
   private enabled: boolean;
   private maskSensitiveData: boolean;
   private sensitiveKeys: Set<string>;
+  private valuePatterns: RegExp[];
   private level: NonNullable<LoggerConfig['level']>;
 
   constructor(config: LoggerConfig = {}) {
     this.enabled = config.enabled ?? __DEV__ONLY_DEFAULT();
     this.maskSensitiveData = config.maskSensitiveData ?? true;
+    const redact = config.redact ?? [];
+    const extraKeys = redact.filter((r): r is string => typeof r === 'string');
+    const extraPatterns = redact.filter((r): r is RegExp => r instanceof RegExp);
     this.sensitiveKeys = new Set(
-      [...DEFAULT_SENSITIVE_KEYS, ...(config.sensitiveKeys ?? [])].map((k) => k.toLowerCase())
+      [...DEFAULT_SENSITIVE_KEYS, ...(config.sensitiveKeys ?? []), ...extraKeys].map((k) =>
+        k.toLowerCase()
+      )
     );
+    this.valuePatterns = [...DEFAULT_VALUE_PATTERNS, ...extraPatterns];
     this.level = config.level ?? 'warn';
+  }
+
+  /** Redact a value for safe logging / replay export. */
+  redact(value: any): any {
+    return this.mask(value);
   }
 
   private mask(value: any, seen = new WeakSet<object>()): any {
     if (!this.maskSensitiveData) return value;
     if (value === null || value === undefined) return value;
+
+    if (typeof value === 'string') {
+      let out = value;
+      for (const pattern of this.valuePatterns) {
+        out = out.replace(pattern, '***REDACTED***');
+      }
+      return out;
+    }
 
     if (Array.isArray(value)) {
       return value.map((v) => this.mask(v, seen));
@@ -88,7 +117,6 @@ export class Logger {
   }
 }
 
-// `__DEV__` is a React Native global; guard for non-RN environments (tests/tools).
 function __DEV__ONLY_DEFAULT(): boolean {
   try {
     // eslint-disable-next-line no-undef

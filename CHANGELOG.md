@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-20
+
+### Added
+- `useScreenApi()` — declare all screen queries/mutations in one object
+- `defineResource()` + `useResource()` — REST CRUD in a few lines
+- Adaptive networking (`networkAware`) — auto timeout/retry from NetInfo quality
+- Circuit breaker (`circuitBreaker`) with optional fallback
+- ETag / `If-None-Match` conditional cache revalidation (`cache.etag`)
+- Offline conflict strategies (`offline.onConflict`: server-wins / client-wins / ask / custom)
+- `useSyncMutation()` — optimistic + offline queue + conflict handling
+- `prefetchOnFocus()` / `prefetch()` — React Navigation / Expo Router prefetch
+- `api.exportReplay()` — shareable JSON/HAR request timeline (privacy-redacted)
+- Localized errors (`locale` + `locales` maps)
+- Privacy-safe logger `redact` patterns (phones, emails, custom RegExp)
+- `registerBackgroundSync()` — Expo BackgroundFetch offline queue flush helper
+
 ## [1.3.0] - 2026-10-19
 
 ### Added

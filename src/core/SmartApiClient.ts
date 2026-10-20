@@ -33,6 +33,8 @@ import { applyPresets } from './presets';
 import { resolveMockResponse } from './mock';
 import { validateWithSchema } from './schema';
 import { openStream, type StreamOptions, type StreamHandle } from './stream';
+import { CircuitBreaker } from './CircuitBreaker';
+import { adaptiveOverrides } from './adaptiveNetwork';
 
 const DEFAULT_TIMEOUT = 30000;
 
@@ -47,6 +49,7 @@ export class SmartApiClient {
   private queryManager: QueryManager;
   private requestLog: RequestLog;
   private logger: Logger;
+  private circuitBreaker: CircuitBreaker | null = null;
 
   private requestInterceptors: RequestInterceptor[] = [];
   private responseInterceptors: ResponseInterceptor[] = [];
@@ -57,14 +60,16 @@ export class SmartApiClient {
     this.config = config;
     this.logger = new Logger(config.logger);
     this.errorEngine = new ErrorEngine(config.errorMap);
+    this.errorEngine.setLocale(config.locale, config.locales);
     this.cacheManager = new CacheManager(config.cache);
     this.retryManager = new RetryManager(config.retry);
     this.tokenManager = new TokenManager(config.auth);
     this.networkMonitor = new NetworkMonitor();
     this.offlineQueue = new OfflineQueue(this.networkMonitor, config.offline);
-    this.offlineQueue.setFlusher((cfg) => this.request(cfg));
+    this.offlineQueue.setFlusher((cfg) => this.flushWithConflictHandling(cfg));
     this.queryManager = new QueryManager();
     this.requestLog = new RequestLog(!!config.devtools?.enabled);
+    this.circuitBreaker = this.createBreaker(config.circuitBreaker);
 
     const deviceInfo = config.deviceInfo ?? createDefaultDeviceInfoProvider();
 
@@ -84,6 +89,14 @@ export class SmartApiClient {
     this.errorInterceptors = [...(config.errorInterceptors ?? [])];
   }
 
+  private createBreaker(
+    config: SmartApiConfig['circuitBreaker']
+  ): CircuitBreaker | null {
+    if (!config) return null;
+    if (config === true) return new CircuitBreaker();
+    return new CircuitBreaker(config);
+  }
+
   // ---------------------------------------------------------------------
   // Public configuration API
   // ---------------------------------------------------------------------
@@ -99,14 +112,20 @@ export class SmartApiClient {
     if (withPresets.errorMap || partial.errorMap) {
       this.errorEngine.setGlobalErrorMap(this.config.errorMap ?? {});
     }
+    if (withPresets.locale || withPresets.locales || partial.locale || partial.locales) {
+      this.errorEngine.setLocale(this.config.locale, this.config.locales);
+    }
     if (withPresets.logger || partial.logger) {
       this.logger = new Logger(this.config.logger);
     }
     if (withPresets.offline || partial.offline) {
-      this.offlineQueue.updateConfig(this.config.offline);
+      this.offlineQueue.updateConfig(this.config.offline ?? {});
     }
     if (withPresets.devtools || partial.devtools) {
       this.requestLog.setEnabled(!!this.config.devtools?.enabled);
+    }
+    if (withPresets.circuitBreaker !== undefined || partial.circuitBreaker !== undefined) {
+      this.circuitBreaker = this.createBreaker(this.config.circuitBreaker);
     }
   }
 
@@ -190,6 +209,44 @@ export class SmartApiClient {
       return;
     }
     this.queryManager.setData(key, dataOrUpdater);
+  }
+
+  /**
+   * Export a shareable request/response timeline for QA / support.
+   *
+   *   const json = api.exportReplay();
+   *   const har = api.exportReplay({ format: 'har' });
+   */
+  exportReplay(options: { format?: 'json' | 'har'; limit?: number } = {}): string {
+    return this.requestLog.exportReplay({
+      ...options,
+      redact: (value) => this.logger.redact(value),
+    });
+  }
+
+  /** Flush queued mutations with conflict handling. */
+  private async flushWithConflictHandling(cfg: SmartApiRequestConfig): Promise<any> {
+    try {
+      return await this.request(cfg);
+    } catch (err) {
+      const error = err as SmartApiError;
+      if (error.status === 409 || error.code === 'HTTP_409') {
+        const strategy = this.config.offline?.onConflict ?? 'server-wins';
+        if (strategy === 'server-wins' || strategy === 'ask') {
+          return undefined; // drop queued client change
+        }
+        if (strategy === 'client-wins') {
+          return this.request({
+            ...cfg,
+            headers: { ...cfg.headers, 'X-Conflict-Resolve': 'client' },
+          });
+        }
+        if (typeof strategy === 'function') {
+          return strategy({ config: cfg, error, server: error.details });
+        }
+      }
+      throw err;
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -310,6 +367,29 @@ export class SmartApiClient {
       headers: { ...this.config.headers, ...rawConfig.headers },
     };
 
+    // Adaptive networking — tune timeout/retry from connection quality.
+    if (this.config.networkAware) {
+      const quality = await this.networkMonitor.getQuality();
+      const adapted = adaptiveOverrides(quality, config.timeout ?? DEFAULT_TIMEOUT);
+      config.timeout = adapted.timeout;
+      if (config.retry === undefined || config.retry === true) {
+        config.retry = {
+          enabled: adapted.retryAttempts > 0,
+          attempts: adapted.retryAttempts,
+        };
+      } else if (typeof config.retry === 'object' && config.retry.attempts === undefined) {
+        config.retry = { ...config.retry, attempts: adapted.retryAttempts };
+      }
+    }
+
+    // Circuit breaker gate.
+    if (this.circuitBreaker) {
+      const gate = this.circuitBreaker.beforeRequest();
+      if (!gate.allow) {
+        return this.finalize<T>(gate.fallback as T, config, 200, {}, true);
+      }
+    }
+
     // Run request interceptor chain.
     if (!config.skipInterceptors) {
       for (const interceptor of this.requestInterceptors) {
@@ -320,6 +400,15 @@ export class SmartApiClient {
     const cacheConfig = this.cacheManager.resolveConfig(config.cache);
     const cacheKey = cacheConfig.key ?? generateCacheKey(config.method ?? 'GET', config.url, config.params);
     const isGet = (config.method ?? 'GET').toUpperCase() === 'GET';
+
+    // ETag conditional request.
+    if (isGet && cacheConfig.etag) {
+      const etag = this.cacheManager.getEtag(cacheKey);
+      if (etag) {
+        config.headers = { ...config.headers, 'If-None-Match': etag };
+      }
+    }
+
     const logId = this.requestLog.start(config);
 
     try {
@@ -407,27 +496,49 @@ export class SmartApiClient {
         }
       }
 
-      const response = await this.executeWithRetry<T>(config);
+      try {
+        const response = await this.executeWithRetry<T>(config);
 
-      if (isGet && cacheConfig.enabled) {
-        await this.cacheManager.set(cacheKey, response.data, cacheConfig.ttl, cacheConfig.storage);
+        // HTTP 304 Not Modified → serve cached body.
+        if (response.status === 304 && isGet) {
+          const cached = await this.cacheManager.get<T>(cacheKey, cacheConfig.storage);
+          if (cached !== undefined) {
+            const cachedResponse = this.finalize<T>(cached, config, 200, response.headers, true);
+            this.circuitBreaker?.recordSuccess();
+            this.requestLog.success(logId, cachedResponse);
+            return cachedResponse;
+          }
+        }
+
+        if (isGet && cacheConfig.enabled) {
+          await this.cacheManager.set(cacheKey, response.data, cacheConfig.ttl, cacheConfig.storage);
+        }
+
+        if (isGet && cacheConfig.etag) {
+          const etag = response.headers.etag ?? response.headers.ETag;
+          if (etag) this.cacheManager.setEtag(cacheKey, etag);
+        }
+
+        if (isGet) {
+          this.queryManager.remember(cacheKey, response.data);
+        }
+
+        // Invalidate cached GETs for the same resource after a mutation.
+        if (!isGet) {
+          const urlRoot = config.url.split('?')[0];
+          this.cacheManager.invalidatePrefix(`GET:${urlRoot}`);
+          this.queryManager.invalidate(`GET:${urlRoot}`);
+          this.queryManager.invalidate(urlRoot);
+        }
+
+        this.circuitBreaker?.recordSuccess();
+        this.requestLog.success(logId, response);
+        void this.config.onSuccess?.(response);
+        return response;
+      } catch (inner) {
+        this.circuitBreaker?.recordFailure();
+        throw inner;
       }
-
-      if (isGet) {
-        this.queryManager.remember(cacheKey, response.data);
-      }
-
-      // Invalidate cached GETs for the same resource after a mutation.
-      if (!isGet) {
-        const urlRoot = config.url.split('?')[0];
-        this.cacheManager.invalidatePrefix(`GET:${urlRoot}`);
-        this.queryManager.invalidate(`GET:${urlRoot}`);
-        this.queryManager.invalidate(urlRoot);
-      }
-
-      this.requestLog.success(logId, response);
-      void this.config.onSuccess?.(response);
-      return response;
     } catch (err) {
       if (err instanceof SmartApiError) {
         this.requestLog.failure(logId, err);
@@ -558,6 +669,18 @@ export class SmartApiClient {
     rawResponse.headers.forEach((value: string, key: string) => {
       responseHeaders[key] = value;
     });
+
+    // 304 has empty body — caller serves cache.
+    if (rawResponse.status === 304) {
+      return {
+        data: undefined as any,
+        status: 304,
+        headers: responseHeaders,
+        ok: true,
+        fromCache: true,
+        config,
+      };
+    }
 
     const parsedBody = await this.parseBody(rawResponse);
 
